@@ -211,7 +211,7 @@ export async function syncPending(force = false): Promise<{ synced: number; fail
 
         await setStatus(p, {
           status: "synced",
-          photoPath,
+          photoPath: photoPath ?? undefined,
           syncedAt: new Date().toISOString(),
           lastError: undefined,
         });
