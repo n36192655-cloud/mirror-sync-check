@@ -84,6 +84,22 @@ function ReadingsPage() {
   const refresh = useCallback(async () => {
     if (!tenantId) return;
     setLoading(true);
+
+    // بدون شبكة: نعمل من اللقطة المحفوظة محلياً (IndexedDB) بدل شاشة فارغة.
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      const snap = await readFieldCache<FieldCache>(fieldCacheKey(tenantId));
+      if (snap) {
+        setCustomers(snap.data.customers);
+        setReadings(snap.data.readings);
+        setMeterLinks(snap.data.meterLinks);
+        setReadingsCount(snap.data.readingsCount);
+        setBillsCount(snap.data.billsCount);
+        setOfflineSnapshotAt(snap.savedAt);
+      }
+      setLoading(false);
+      return;
+    }
+
     const [cs, rs, bs, rc, bc, ma] = await Promise.all([
       supabase.from("customers").select("*").order("name"),
       supabase.from("water_readings").select("*").order("created_at", { ascending: false }).limit(500),
@@ -101,21 +117,35 @@ function ReadingsPage() {
     if (!bs.error) setBills(bs.data ?? []);
     if (!rc.error) setReadingsCount(rc.count ?? 0);
     if (!bc.error) setBillsCount(bc.count ?? 0);
+    let links: { id: string; number: string; customer_id: string }[] = [];
     if (!ma.error) {
-      setMeterLinks(
-        (ma.data ?? [])
-          .filter((a) => a.customer_id && a.meter_id)
-          .map((a) => ({
-            id: a.meter_id as string,
-            customer_id: a.customer_id as string,
-            number: ((a as unknown as { meters?: { serial?: string } }).meters?.serial) ?? "",
-          })),
-      );
+      links = (ma.data ?? [])
+        .filter((a) => a.customer_id && a.meter_id)
+        .map((a) => ({
+          id: a.meter_id as string,
+          customer_id: a.customer_id as string,
+          number: ((a as unknown as { meters?: { serial?: string } }).meters?.serial) ?? "",
+        }));
+      setMeterLinks(links);
+    }
+
+    // لقطة صغيرة للعمل الميداني فقط (مشتركون + عدادات + آخر القراءات).
+    if (!cs.error) {
+      setOfflineSnapshotAt(null);
+      void saveFieldCache<FieldCache>(fieldCacheKey(tenantId), {
+        customers: cs.data ?? [],
+        readings: (rs.data ?? []).slice(0, 300),
+        meterLinks: links,
+        readingsCount: rc.count ?? 0,
+        billsCount: bc.count ?? 0,
+      });
+      void requestPersistentStorage();
     }
     setLoading(false);
   }, [tenantId]);
 
   useEffect(() => { void refresh(); }, [refresh]);
+
 
 
   useEffect(() => {
