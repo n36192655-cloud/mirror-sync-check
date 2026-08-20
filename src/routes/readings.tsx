@@ -16,12 +16,30 @@ import {
 import { fmtYER } from "@/lib/pricing";
 import { MeterCamera } from "@/components/meter-camera";
 import { getGeoFix, type GeoFix } from "@/lib/geolocation";
-import { addPending } from "@/lib/sync";
+import { addPending, useOfflineQueue, syncPending, isUnsynced, type PendingReading } from "@/lib/sync";
+import { readFieldCache, saveFieldCache, requestPersistentStorage } from "@/lib/offline-db";
 import type { Database } from "@/integrations/supabase/types";
 
 type CustomerRow = Database["public"]["Tables"]["customers"]["Row"];
 type ReadingRow = Database["public"]["Tables"]["water_readings"]["Row"];
 type BillRow = Database["public"]["Tables"]["water_bills"]["Row"];
+
+/** لقطة العمل الميداني المخزّنة محلياً — الحد الأدنى اللازم للقارئ. */
+interface FieldCache {
+  customers: CustomerRow[];
+  readings: ReadingRow[];
+  meterLinks: { id: string; number: string; customer_id: string }[];
+  readingsCount: number;
+  billsCount: number;
+}
+const fieldCacheKey = (tenantId: string) => `field:${tenantId}`;
+
+const QUEUE_LABEL: Record<PendingReading["status"], string> = {
+  pending: "بانتظار المزامنة",
+  syncing: "جاري المزامنة",
+  synced: "تمت المزامنة",
+  failed: "فشلت — سيعاد المحاولة",
+};
 
 export const Route = createFileRoute("/readings")({
   head: () => ({ meta: [{ title: "القراءات — ميزان" }] }),
@@ -41,6 +59,8 @@ function ReadingsPage() {
   const [readingsCount, setReadingsCount] = useState(0);
   const [billsCount, setBillsCount] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [offlineSnapshotAt, setOfflineSnapshotAt] = useState<string | null>(null);
+  const { items: queue } = useOfflineQueue();
 
 
   const [q, setQ] = useState("");
@@ -278,7 +298,7 @@ function ReadingsPage() {
       const clientUuid = crypto.randomUUID();
 
       if (typeof navigator !== "undefined" && !navigator.onLine) {
-        addPending({
+        await addPending({
           clientId: clientUuid,
           meterId: selectedMeter.id,
           meterNumber: selectedMeter.number,
@@ -290,8 +310,8 @@ function ReadingsPage() {
           longitude: fix?.lng,
           accuracy: fix?.accuracy,
           tenantId,
-        });
-        toast.success("لا يوجد اتصال — حُفظت القراءة محلياً وسترسل تلقائياً عند عودة الشبكة");
+        }, photoBlob);
+        toast.success("لا يوجد اتصال — حُفظت القراءة والصورة محلياً وسترسل تلقائياً عند عودة الشبكة");
         resetForm();
         return;
       }
