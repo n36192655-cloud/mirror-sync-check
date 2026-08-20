@@ -16,12 +16,30 @@ import {
 import { fmtYER } from "@/lib/pricing";
 import { MeterCamera } from "@/components/meter-camera";
 import { getGeoFix, type GeoFix } from "@/lib/geolocation";
-import { addPending } from "@/lib/sync";
+import { addPending, useOfflineQueue, syncPending, isUnsynced, type PendingReading } from "@/lib/sync";
+import { readFieldCache, saveFieldCache, requestPersistentStorage } from "@/lib/offline-db";
 import type { Database } from "@/integrations/supabase/types";
 
 type CustomerRow = Database["public"]["Tables"]["customers"]["Row"];
 type ReadingRow = Database["public"]["Tables"]["water_readings"]["Row"];
 type BillRow = Database["public"]["Tables"]["water_bills"]["Row"];
+
+/** لقطة العمل الميداني المخزّنة محلياً — الحد الأدنى اللازم للقارئ. */
+interface FieldCache {
+  customers: CustomerRow[];
+  readings: ReadingRow[];
+  meterLinks: { id: string; number: string; customer_id: string }[];
+  readingsCount: number;
+  billsCount: number;
+}
+const fieldCacheKey = (tenantId: string) => `field:${tenantId}`;
+
+const QUEUE_LABEL: Record<PendingReading["status"], string> = {
+  pending: "بانتظار المزامنة",
+  syncing: "جاري المزامنة",
+  synced: "تمت المزامنة",
+  failed: "فشلت — سيعاد المحاولة",
+};
 
 export const Route = createFileRoute("/readings")({
   head: () => ({ meta: [{ title: "القراءات — ميزان" }] }),
@@ -41,6 +59,8 @@ function ReadingsPage() {
   const [readingsCount, setReadingsCount] = useState(0);
   const [billsCount, setBillsCount] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [offlineSnapshotAt, setOfflineSnapshotAt] = useState<string | null>(null);
+  const { items: queue } = useOfflineQueue();
 
 
   const [q, setQ] = useState("");
@@ -84,6 +104,22 @@ function ReadingsPage() {
   const refresh = useCallback(async () => {
     if (!tenantId) return;
     setLoading(true);
+
+    // بدون شبكة: نعمل من اللقطة المحفوظة محلياً (IndexedDB) بدل شاشة فارغة.
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      const snap = await readFieldCache<FieldCache>(fieldCacheKey(tenantId));
+      if (snap) {
+        setCustomers(snap.data.customers);
+        setReadings(snap.data.readings);
+        setMeterLinks(snap.data.meterLinks);
+        setReadingsCount(snap.data.readingsCount);
+        setBillsCount(snap.data.billsCount);
+        setOfflineSnapshotAt(snap.savedAt);
+      }
+      setLoading(false);
+      return;
+    }
+
     const [cs, rs, bs, rc, bc, ma] = await Promise.all([
       supabase.from("customers").select("*").order("name"),
       supabase.from("water_readings").select("*").order("created_at", { ascending: false }).limit(500),
@@ -101,21 +137,35 @@ function ReadingsPage() {
     if (!bs.error) setBills(bs.data ?? []);
     if (!rc.error) setReadingsCount(rc.count ?? 0);
     if (!bc.error) setBillsCount(bc.count ?? 0);
+    let links: { id: string; number: string; customer_id: string }[] = [];
     if (!ma.error) {
-      setMeterLinks(
-        (ma.data ?? [])
-          .filter((a) => a.customer_id && a.meter_id)
-          .map((a) => ({
-            id: a.meter_id as string,
-            customer_id: a.customer_id as string,
-            number: ((a as unknown as { meters?: { serial?: string } }).meters?.serial) ?? "",
-          })),
-      );
+      links = (ma.data ?? [])
+        .filter((a) => a.customer_id && a.meter_id)
+        .map((a) => ({
+          id: a.meter_id as string,
+          customer_id: a.customer_id as string,
+          number: ((a as unknown as { meters?: { serial?: string } }).meters?.serial) ?? "",
+        }));
+      setMeterLinks(links);
+    }
+
+    // لقطة صغيرة للعمل الميداني فقط (مشتركون + عدادات + آخر القراءات).
+    if (!cs.error) {
+      setOfflineSnapshotAt(null);
+      void saveFieldCache<FieldCache>(fieldCacheKey(tenantId), {
+        customers: cs.data ?? [],
+        readings: (rs.data ?? []).slice(0, 300),
+        meterLinks: links,
+        readingsCount: rc.count ?? 0,
+        billsCount: bc.count ?? 0,
+      });
+      void requestPersistentStorage();
     }
     setLoading(false);
   }, [tenantId]);
 
   useEffect(() => { void refresh(); }, [refresh]);
+
 
 
   useEffect(() => {
@@ -248,7 +298,7 @@ function ReadingsPage() {
       const clientUuid = crypto.randomUUID();
 
       if (typeof navigator !== "undefined" && !navigator.onLine) {
-        addPending({
+        await addPending({
           clientId: clientUuid,
           meterId: selectedMeter.id,
           meterNumber: selectedMeter.number,
@@ -260,8 +310,8 @@ function ReadingsPage() {
           longitude: fix?.lng,
           accuracy: fix?.accuracy,
           tenantId,
-        });
-        toast.success("لا يوجد اتصال — حُفظت القراءة محلياً وسترسل تلقائياً عند عودة الشبكة");
+        }, photoBlob);
+        toast.success("لا يوجد اتصال — حُفظت القراءة والصورة محلياً وسترسل تلقائياً عند عودة الشبكة");
         resetForm();
         return;
       }
@@ -345,6 +395,13 @@ function ReadingsPage() {
           <RefreshCw className={`w-4 h-4 ms-1 ${loading ? "animate-spin" : ""}`} /> تحديث
         </Button>
       </div>
+
+      {offlineSnapshotAt && (
+        <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700">
+          وضع الأوفلاين — البيانات المعروضة لقطة محلية محفوظة بتاريخ{" "}
+          {new Date(offlineSnapshotAt).toLocaleString("ar")}. يمكنك تسجيل القراءات وستُرسل عند عودة الشبكة.
+        </div>
+      )}
 
       <div className="flex gap-2 flex-wrap">
         <Button size="sm" variant={tab === "input" ? "default" : "outline"} onClick={() => setTab("input")}>إدخال</Button>
@@ -451,6 +508,44 @@ function ReadingsPage() {
                 {geo && <Badge variant="outline" className="gap-1"><MapPin className="w-3 h-3" /> {geo.lat.toFixed(4)}, {geo.lng.toFixed(4)}</Badge>}
               </div>
             )}
+          </CardContent>
+        </Card>
+      )}
+
+      {tab === "input" && queue.length > 0 && (
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between">
+            <CardTitle className="text-base">
+              القراءات المحفوظة على الجهاز ({queue.filter(isUnsynced).length} بانتظار المزامنة)
+            </CardTitle>
+            <Button size="sm" variant="outline" onClick={() => void syncPending(true)}>
+              <RefreshCw className="w-3 h-3 ms-1" /> مزامنة الآن
+            </Button>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {queue.map((p) => (
+              <div key={p.clientId} className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-2 text-xs">
+                <div className="space-y-0.5">
+                  <div className="font-semibold">
+                    عداد <span className="font-mono" dir="ltr">{p.meterNumber || "—"}</span> · قراءة{" "}
+                    <span className="font-mono">{p.current}</span>
+                  </div>
+                  <div className="text-muted-foreground">
+                    {new Date(p.createdAt).toLocaleString("ar")}
+                    {p.hasPhoto || p.photoPath ? " · صورة محفوظة" : " · بدون صورة"}
+                    {p.attempts > 0 ? ` · محاولات: ${p.attempts}` : ""}
+                  </div>
+                  {p.lastError && <div className="text-destructive">{p.lastError}</div>}
+                </div>
+                <Badge
+                  variant={
+                    p.status === "synced" ? "default" : p.status === "failed" ? "destructive" : "secondary"
+                  }
+                >
+                  {QUEUE_LABEL[p.status]}
+                </Badge>
+              </div>
+            ))}
           </CardContent>
         </Card>
       )}
