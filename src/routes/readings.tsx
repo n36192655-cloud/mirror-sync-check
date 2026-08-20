@@ -396,6 +396,13 @@ function ReadingsPage() {
         </Button>
       </div>
 
+      {offlineSnapshotAt && (
+        <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700">
+          وضع الأوفلاين — البيانات المعروضة لقطة محلية محفوظة بتاريخ{" "}
+          {new Date(offlineSnapshotAt).toLocaleString("ar")}. يمكنك تسجيل القراءات وستُرسل عند عودة الشبكة.
+        </div>
+      )}
+
       <div className="flex gap-2 flex-wrap">
         <Button size="sm" variant={tab === "input" ? "default" : "outline"} onClick={() => setTab("input")}>إدخال</Button>
         {!isReader && (
@@ -501,6 +508,44 @@ function ReadingsPage() {
                 {geo && <Badge variant="outline" className="gap-1"><MapPin className="w-3 h-3" /> {geo.lat.toFixed(4)}, {geo.lng.toFixed(4)}</Badge>}
               </div>
             )}
+          </CardContent>
+        </Card>
+      )}
+
+      {tab === "input" && queue.length > 0 && (
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between">
+            <CardTitle className="text-base">
+              القراءات المحفوظة على الجهاز ({queue.filter(isUnsynced).length} بانتظار المزامنة)
+            </CardTitle>
+            <Button size="sm" variant="outline" onClick={() => void syncPending(true)}>
+              <RefreshCw className="w-3 h-3 ms-1" /> مزامنة الآن
+            </Button>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {queue.map((p) => (
+              <div key={p.clientId} className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-2 text-xs">
+                <div className="space-y-0.5">
+                  <div className="font-semibold">
+                    عداد <span className="font-mono" dir="ltr">{p.meterNumber || "—"}</span> · قراءة{" "}
+                    <span className="font-mono">{p.current}</span>
+                  </div>
+                  <div className="text-muted-foreground">
+                    {new Date(p.createdAt).toLocaleString("ar")}
+                    {p.hasPhoto || p.photoPath ? " · صورة محفوظة" : " · بدون صورة"}
+                    {p.attempts > 0 ? ` · محاولات: ${p.attempts}` : ""}
+                  </div>
+                  {p.lastError && <div className="text-destructive">{p.lastError}</div>}
+                </div>
+                <Badge
+                  variant={
+                    p.status === "synced" ? "default" : p.status === "failed" ? "destructive" : "secondary"
+                  }
+                >
+                  {QUEUE_LABEL[p.status]}
+                </Badge>
+              </div>
+            ))}
           </CardContent>
         </Card>
       )}
