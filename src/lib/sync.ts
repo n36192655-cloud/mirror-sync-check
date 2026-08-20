@@ -1,16 +1,30 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useStore } from "./store";
 import { supabase } from "./supabase";
 import { toast } from "sonner";
 import type { Database } from "@/integrations/supabase/types";
+import {
+  STORE_BLOBS,
+  STORE_QUEUE,
+  idbDelete,
+  idbGet,
+  idbGetAll,
+  idbPut,
+  requestPersistentStorage,
+} from "./offline-db";
 
 type ReadingInsert = Database["public"]["Tables"]["water_readings"]["Insert"];
 
-// Pending water-reading queue kept in localStorage so meter readers can keep
-// working in low-connectivity zones. On reconnect the queue is flushed
-// straight into `water_readings`; the database owns previous index,
-// consumption, anomaly flags, status and billing. `clientId` is sent as
-// `client_uuid`, which is UNIQUE per tenant — replays are no-ops.
+const PHOTO_BUCKET = "meter-readings";
+
+/** حالات العنصر في طابور المزامنة — تُعرض للمستخدم كما هي. */
+export type QueueStatus = "pending" | "syncing" | "synced" | "failed";
+
+/**
+ * قراءة ميدانية مؤجلة. تُخزَّن في IndexedDB (دائمة عبر إغلاق التطبيق) مع
+ * صورة العداد كـ Blob منفصل. `clientId` يُرسل كـ `client_uuid` وهو UNIQUE
+ * لكل مؤسسة — أي إعادة مزامنة لا تُنشئ تكراراً.
+ */
 export interface PendingReading {
   clientId: string;
   /** customer uuid */
@@ -26,92 +40,221 @@ export interface PendingReading {
   longitude?: number;
   accuracy?: number;
   tenantId?: string;
+  /** توجد صورة عداد محفوظة محلياً لهذا العنصر. */
+  hasPhoto?: boolean;
+  photoType?: string;
+  /** مسار الصورة بعد رفعها بنجاح (يمنع إعادة الرفع عند إعادة المحاولة). */
+  photoPath?: string;
+  status: QueueStatus;
+  attempts: number;
+  lastError?: string;
+  lastAttemptAt?: string;
+  syncedAt?: string;
 }
 
-// v3: payload carries the real meters.id uuid and is flushed to the database
-// (v1/v2 payloads used client-side ids and are intentionally dropped).
-const KEY = "mizan-pending-readings-v3";
+const LEGACY_KEY = "mizan-pending-readings-v3";
+const EVENT = "mizan-pending-updated";
 
-function load(): PendingReading[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = window.localStorage.getItem(KEY);
-    return raw ? (JSON.parse(raw) as PendingReading[]) : [];
-  } catch {
-    return [];
-  }
+function notify() {
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(EVENT));
 }
 
-function save(arr: PendingReading[]) {
+/** ترحيل الطابور القديم (localStorage) إلى التخزين الدائم مرة واحدة. */
+async function migrateLegacy(): Promise<void> {
   if (typeof window === "undefined") return;
-  window.localStorage.setItem(KEY, JSON.stringify(arr));
-  window.dispatchEvent(new Event("mizan-pending-updated"));
+  let raw: string | null = null;
+  try {
+    raw = window.localStorage.getItem(LEGACY_KEY);
+  } catch {
+    return;
+  }
+  if (!raw) return;
+  try {
+    const old = JSON.parse(raw) as Partial<PendingReading>[];
+    for (const p of old) {
+      if (!p?.clientId) continue;
+      const existing = await idbGet<PendingReading>(STORE_QUEUE, p.clientId);
+      if (existing) continue;
+      await idbPut(STORE_QUEUE, {
+        ...p,
+        status: "pending",
+        attempts: 0,
+        createdAt: p.createdAt ?? new Date().toISOString(),
+      } as PendingReading);
+    }
+  } catch {
+    /* بيانات تالفة — تُتجاهل */
+  }
+  try {
+    window.localStorage.removeItem(LEGACY_KEY);
+  } catch {
+    /* ignore */
+  }
+  notify();
 }
 
-export function getPending(): PendingReading[] {
-  return load();
+let migrated: Promise<void> | null = null;
+function ensureMigrated(): Promise<void> {
+  if (!migrated) migrated = migrateLegacy();
+  return migrated;
 }
 
-export function addPending(
-  p: Omit<PendingReading, "clientId" | "createdAt"> & { clientId?: string },
-): PendingReading {
-  const list = load();
+export async function getPending(): Promise<PendingReading[]> {
+  await ensureMigrated();
+  const all = await idbGetAll<PendingReading>(STORE_QUEUE);
+  return all.sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
+}
+
+/** العناصر التي ما زالت بحاجة إلى مزامنة. */
+export function isUnsynced(p: PendingReading): boolean {
+  return p.status !== "synced";
+}
+
+export async function addPending(
+  p: Omit<PendingReading, "clientId" | "createdAt" | "status" | "attempts"> & { clientId?: string },
+  photo?: Blob | null,
+): Promise<PendingReading> {
+  await ensureMigrated();
+  void requestPersistentStorage();
+  const clientId = p.clientId ?? `${crypto.randomUUID()}`;
   const item: PendingReading = {
     ...p,
-    clientId: p.clientId ?? `p_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    clientId,
     createdAt: new Date().toISOString(),
+    status: "pending",
+    attempts: 0,
+    hasPhoto: !!photo,
+    photoType: photo?.type,
   };
-  save([...list, item]);
+  if (photo) await idbPut(STORE_BLOBS, photo, clientId);
+  await idbPut(STORE_QUEUE, item);
+  notify();
   return item;
 }
 
-export function removePending(clientId: string) {
-  save(load().filter((p) => p.clientId !== clientId));
+export async function removePending(clientId: string): Promise<void> {
+  await idbDelete(STORE_QUEUE, clientId);
+  await idbDelete(STORE_BLOBS, clientId);
+  notify();
 }
 
-export async function syncPending(): Promise<{ synced: number }> {
-  const list = load();
-  if (!list.length) return { synced: 0 };
+export async function getPendingPhoto(clientId: string): Promise<Blob | undefined> {
+  return idbGet<Blob>(STORE_BLOBS, clientId);
+}
 
-  let n = 0;
-  const remaining: PendingReading[] = [];
+async function setStatus(item: PendingReading, patch: Partial<PendingReading>) {
+  await idbPut(STORE_QUEUE, { ...item, ...patch });
+  notify();
+}
 
-  for (const p of list) {
-    const { data: tenantRow } = await supabase.rpc("current_tenant_id");
-    const tenantId = p.tenantId ?? (tenantRow as unknown as string | null);
-    if (!tenantId) { remaining.push(p); continue; }
+/** مهلة تصاعدية بين المحاولات الفاشلة (30ث، 1د، 2د … بحد أقصى 15د). */
+function readyForRetry(p: PendingReading): boolean {
+  if (p.status === "synced") return false;
+  if (p.status !== "failed" || !p.lastAttemptAt) return true;
+  const wait = Math.min(15 * 60_000, 30_000 * 2 ** Math.min(p.attempts, 5));
+  return Date.now() - +new Date(p.lastAttemptAt) >= wait;
+}
 
-    const { error } = await supabase.from("water_readings").insert({
-      tenant_id: tenantId,
-      customer_id: p.customerId,
-      meter_id: p.meterId,
-      current_reading: p.current,
-      reading_date: p.readingDate,
-      client_uuid: p.clientId,
-      lat: p.latitude ?? null,
-      lng: p.longitude ?? null,
-      accuracy: p.accuracy ?? null,
-      gps_verified: p.latitude != null,
-    } as ReadingInsert);
+let syncing = false;
 
-    // 23505 = already stored under this client_uuid → the queue entry is done.
-    const duplicate = error?.code === "23505";
-    if (error && !duplicate) {
-      toast.error(`تعذّرت مزامنة قراءة مؤجلة: ${error.message}`);
-      remaining.push(p);
-      continue;
+export async function syncPending(force = false): Promise<{ synced: number; failed: number }> {
+  if (syncing) return { synced: 0, failed: 0 };
+  if (typeof navigator !== "undefined" && !navigator.onLine) return { synced: 0, failed: 0 };
+  syncing = true;
+  try {
+    const list = (await getPending()).filter((p) => isUnsynced(p) && (force || readyForRetry(p)));
+    if (!list.length) return { synced: 0, failed: 0 };
+
+    let synced = 0;
+    let failed = 0;
+
+    for (const p of list) {
+      await setStatus(p, { status: "syncing" });
+      try {
+        const { data: tenantRow } = await supabase.rpc("current_tenant_id");
+        const tenantId = p.tenantId ?? (tenantRow as unknown as string | null);
+        if (!tenantId) throw new Error("تعذّر تحديد المؤسسة الحالية");
+
+        // 1) رفع صورة العداد المحفوظة محلياً (مرة واحدة فقط لكل عنصر).
+        let photoPath = p.photoPath ?? null;
+        if (!photoPath && p.hasPhoto) {
+          const blob = await getPendingPhoto(p.clientId);
+          if (blob) {
+            const path = `tenants/${tenantId}/readings/${p.clientId}.jpg`;
+            const up = await supabase.storage
+              .from(PHOTO_BUCKET)
+              .upload(path, blob, { contentType: blob.type || "image/jpeg", upsert: true });
+            if (up.error) throw new Error(`رفع الصورة فشل: ${up.error.message}`);
+            photoPath = path;
+            await setStatus(p, { status: "syncing", photoPath });
+          }
+        }
+
+        // 2) إدراج القراءة — client_uuid يمنع التكرار على مستوى قاعدة البيانات.
+        const { error } = await supabase.from("water_readings").insert({
+          tenant_id: tenantId,
+          customer_id: p.customerId,
+          meter_id: p.meterId,
+          current_reading: p.current,
+          reading_date: p.readingDate,
+          client_uuid: p.clientId,
+          reader_id: p.by,
+          photo_url: photoPath,
+          lat: p.latitude ?? null,
+          lng: p.longitude ?? null,
+          accuracy: p.accuracy ?? null,
+          gps_verified: p.latitude != null,
+        } as ReadingInsert);
+
+        // 23505 = مسجلة مسبقاً بنفس client_uuid → العنصر منتهٍ فعلاً.
+        if (error && error.code !== "23505") throw new Error(error.message);
+
+        await setStatus(p, {
+          status: "synced",
+          photoPath,
+          syncedAt: new Date().toISOString(),
+          lastError: undefined,
+        });
+        await idbDelete(STORE_BLOBS, p.clientId);
+        synced++;
+
+        if (p.tenantId) {
+          void broadcastTenantEvent(p.tenantId, "reading", {
+            customerId: p.customerId,
+            meterNumber: p.meterNumber,
+            current: p.current,
+            by: p.by,
+            at: new Date().toISOString(),
+          });
+        }
+      } catch (e) {
+        failed++;
+        await setStatus(p, {
+          status: "failed",
+          attempts: p.attempts + 1,
+          lastAttemptAt: new Date().toISOString(),
+          lastError: (e as Error).message,
+        });
+      }
     }
-    n++;
-    if (p.tenantId) {
-      void broadcastTenantEvent(p.tenantId, "reading", {
-        customerId: p.customerId, meterNumber: p.meterNumber, current: p.current, by: p.by, at: new Date().toISOString(),
-      });
+
+    await pruneSynced();
+    if (synced > 0) void useStore.getState().hydrateFromSupabase();
+    return { synced, failed };
+  } finally {
+    syncing = false;
+  }
+}
+
+/** حذف العناصر المزامنة بعد 24 ساعة (تبقى ظاهرة للمستخدم كإثبات قبل ذلك). */
+async function pruneSynced() {
+  const all = await idbGetAll<PendingReading>(STORE_QUEUE);
+  const cutoff = Date.now() - 24 * 60 * 60_000;
+  for (const p of all) {
+    if (p.status === "synced" && p.syncedAt && +new Date(p.syncedAt) < cutoff) {
+      await removePending(p.clientId);
     }
   }
-
-  save(remaining);
-  if (n > 0) void useStore.getState().hydrateFromSupabase();
-  return { synced: n };
 }
 
 // ─── Supabase Realtime broadcast ────────────────────────────────────────────
@@ -159,7 +302,7 @@ export function useOnlineStatus() {
     const on = () => {
       setOnline(true);
       setTimeout(() => {
-        void syncPending().then((result) => {
+        void syncPending(true).then((result) => {
           if (result.synced > 0) {
             toast.success(`تمت مزامنة ${result.synced} قراءة مؤجلة`);
           }
@@ -178,17 +321,27 @@ export function useOnlineStatus() {
   return online;
 }
 
-export function usePendingCount() {
-  const [count, setCount] = useState<number>(0);
-  useEffect(() => {
-    const refresh = () => setCount(load().length);
-    refresh();
-    window.addEventListener("mizan-pending-updated", refresh);
-    window.addEventListener("storage", refresh);
-    return () => {
-      window.removeEventListener("mizan-pending-updated", refresh);
-      window.removeEventListener("storage", refresh);
-    };
+/** الطابور الحيّ للواجهة مع تحديث فوري عند أي تغيير. */
+export function useOfflineQueue() {
+  const [items, setItems] = useState<PendingReading[]>([]);
+  const refresh = useCallback(() => {
+    void getPending().then(setItems);
   }, []);
-  return count;
+  useEffect(() => {
+    refresh();
+    window.addEventListener(EVENT, refresh);
+    window.addEventListener("storage", refresh);
+    const t = setInterval(refresh, 5000);
+    return () => {
+      window.removeEventListener(EVENT, refresh);
+      window.removeEventListener("storage", refresh);
+      clearInterval(t);
+    };
+  }, [refresh]);
+  return { items, refresh };
+}
+
+export function usePendingCount() {
+  const { items } = useOfflineQueue();
+  return items.filter(isUnsynced).length;
 }
