@@ -57,9 +57,9 @@ export function AppShell({ children }: { children: ReactNode }) {
     let timer: ReturnType<typeof setTimeout> | null = null;
     const refresh = () => {
       if (timer) clearTimeout(timer);
-      timer = setTimeout(() => { void useStore.getState().hydrateFromSupabase(); }, 400);
+      timer = setTimeout(() => { void useStore.getState().hydrateFromSupabase().catch(hydrateFailed); }, 400);
     };
-    void useStore.getState().hydrateFromSupabase();
+    void useStore.getState().hydrateFromSupabase().catch(hydrateFailed);
     const channel = supabase
       .channel("mizan-live")
       .on("postgres_changes", { event: "*", schema: "public", table: "customers" }, refresh)

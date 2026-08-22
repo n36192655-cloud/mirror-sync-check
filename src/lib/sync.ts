@@ -239,7 +239,12 @@ export async function syncPending(force = false): Promise<{ synced: number; fail
     }
 
     await pruneSynced();
-    if (synced > 0) void useStore.getState().hydrateFromSupabase();
+    if (synced > 0) {
+      // فشل التحديث من السحابة لا يمس الطابور ولا اللقطة المحلية.
+      void useStore.getState().hydrateFromSupabase().catch((err) => {
+        console.warn("[Mizan] hydrate after sync failed (offline data kept):", err);
+      });
+    }
     return { synced, failed };
   } finally {
     syncing = false;

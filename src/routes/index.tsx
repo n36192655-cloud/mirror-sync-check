@@ -43,7 +43,9 @@ function Dashboard() {
   const { customers, meters, readings, bills, payments, productionLogs, counts, hydrateFromSupabase } = useStore();
 
   useEffect(() => {
-    void hydrateFromSupabase();
+    void hydrateFromSupabase().catch((err) => {
+      console.warn("[Mizan] hydrate failed (offline data kept):", err);
+    });
   }, [hydrateFromSupabase]);
 
   const k = useMemo(() => {
