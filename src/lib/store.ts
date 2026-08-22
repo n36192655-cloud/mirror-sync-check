@@ -189,6 +189,118 @@ export function billBalance(bill: Bill, payments: Payment[]): number {
   return Math.max(0, Number(bill.total || 0) - approved - pending);
 }
 
+/* =========================================================================
+ * تعريفات موحّدة لمؤشرات الاستدامة (مصدر واحد للحقيقة في الواجهة).
+ * كل صفحة تعرض NRW أو الاستهلاك أو المؤشرات المالية يجب أن تستدعي هذه الدوال
+ * بدل إعادة كتابة المعادلة محلياً — وإلا اختلفت النتائج بين الصفحات.
+ * ========================================================================= */
+
+/** الاستهلاك الرسمي يُحتسب فقط من القراءات المعتمدة (approved). */
+export function isOfficialReading(r: Reading): boolean {
+  return r.status === "approved";
+}
+
+/** استهلاك رسمي غير سالب لقراءة واحدة. */
+export function readingVolume(r: Reading): number {
+  return Math.max(0, Number(r.consumption) || 0);
+}
+
+export interface DateRange {
+  from?: string;
+  to?: string;
+}
+
+function inRange(dateISO: string, range?: DateRange): boolean {
+  if (!range || (!range.from && !range.to)) return true;
+  const t = new Date(dateISO).getTime();
+  if (Number.isNaN(t)) return false;
+  if (range.from) {
+    const f = new Date(range.from).getTime();
+    if (!Number.isNaN(f) && t < f) return false;
+  }
+  if (range.to) {
+    const to = new Date(range.to).getTime() + 24 * 3600 * 1000 - 1;
+    if (!Number.isNaN(to) && t > to) return false;
+  }
+  return true;
+}
+
+/** إجمالي الاستهلاك الرسمي (القراءات المعتمدة فقط) ضمن فترة اختيارية. */
+export function officialConsumption(readings: Reading[], range?: DateRange): number {
+  return readings.reduce(
+    (a, r) => (isOfficialReading(r) && inRange(r.date, range) ? a + readingVolume(r) : a),
+    0,
+  );
+}
+
+export interface NrwResult {
+  produced: number;
+  consumed: number;
+  loss: number;
+  pct: number;
+  efficiencyPct: number;
+}
+
+/**
+ * التعريف الرسمي الوحيد للفاقد (Non-Revenue Water):
+ *   الفاقد   = max(0, المُنتج − الاستهلاك الرسمي المعتمد)
+ *   النسبة % = (الفاقد ÷ المُنتج) × 100   (صفر إذا لم يوجد إنتاج)
+ *   الكفاءة  = 100 − النسبة
+ */
+export function computeNrw(
+  productionLogs: ProductionLog[],
+  readings: Reading[],
+  range?: DateRange,
+): NrwResult {
+  const produced = productionLogs.reduce(
+    (a, p) => (inRange(p.date, range) ? a + (Number(p.units) || 0) : a),
+    0,
+  );
+  const consumed = officialConsumption(readings, range);
+  const loss = Math.max(0, produced - consumed);
+  const pct = produced > 0 ? (loss / produced) * 100 : 0;
+  return { produced, consumed, loss, pct, efficiencyPct: Math.max(0, 100 - pct) };
+}
+
+export interface FinancialSummary {
+  totalBilled: number;
+  totalCollected: number;
+  outstanding: number;
+  collectionRate: number;
+  paidBills: number;
+  unpaidBills: number;
+}
+
+/**
+ * المؤشرات المالية الموحّدة:
+ *   إجمالي الفواتير = Σ bills.total
+ *   المحصّل         = Σ bills.paid_amount (المعتمد في قاعدة البيانات) — بلا ازدواج مع payments
+ *   المتأخرات       = Σ billBalance(فاتورة غير مسددة) = total − معتمد − قيد الاعتماد
+ *   كفاءة التحصيل   = (المحصّل ÷ إجمالي الفواتير) × 100
+ */
+export function computeFinancials(bills: Bill[], payments: Payment[]): FinancialSummary {
+  const totalBilled = bills.reduce((a, b) => a + (Number(b.total) || 0), 0);
+  const totalCollected = bills.reduce((a, b) => {
+    if (b.paid !== undefined) return a + (Number(b.paid) || 0);
+    return (
+      a +
+      payments
+        .filter((p) => p.bill_id === b.id && p.status === "approved")
+        .reduce((s, p) => s + (Number(p.amount) || 0), 0)
+    );
+  }, 0);
+  const unpaid = bills.filter((b) => b.status !== "paid");
+  const outstanding = unpaid.reduce((a, b) => a + billBalance(b, payments), 0);
+  return {
+    totalBilled,
+    totalCollected,
+    outstanding,
+    collectionRate: totalBilled > 0 ? (totalCollected / totalBilled) * 100 : 0,
+    paidBills: bills.length - unpaid.length,
+    unpaidBills: unpaid.length,
+  };
+}
+
 // Stable UUID -> numeric hash so UI keeps numeric IDs while DB uses UUIDs.
 function hashId(uuid: string): number {
   let h = 0;
