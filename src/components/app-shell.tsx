@@ -25,6 +25,11 @@ const NAV: NavItem[] = [
   { to: "/profile", label: "حسابي", icon: User, roles: ["super_admin", "manager", "reader", "collector"] },
 ];
 
+function hydrateFailed(err: unknown) {
+  // فشل جلب البيانات من السحابة (شبكة/توكن) لا يُفسد اللقطة المحلية ولا الطابور.
+  console.warn("[Mizan] hydrate failed (offline data kept):", err);
+}
+
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const navigate = useNavigate();
@@ -57,9 +62,9 @@ export function AppShell({ children }: { children: ReactNode }) {
     let timer: ReturnType<typeof setTimeout> | null = null;
     const refresh = () => {
       if (timer) clearTimeout(timer);
-      timer = setTimeout(() => { void useStore.getState().hydrateFromSupabase(); }, 400);
+      timer = setTimeout(() => { void useStore.getState().hydrateFromSupabase().catch(hydrateFailed); }, 400);
     };
-    void useStore.getState().hydrateFromSupabase();
+    void useStore.getState().hydrateFromSupabase().catch(hydrateFailed);
     const channel = supabase
       .channel("mizan-live")
       .on("postgres_changes", { event: "*", schema: "public", table: "customers" }, refresh)

@@ -115,7 +115,9 @@ export const useAuth = create<AuthState>()(
         });
 
         void registerCurrentDevice().catch(() => {});
-        void useStore.getState().hydrateFromSupabase();
+        void useStore.getState().hydrateFromSupabase().catch((err) => {
+          console.warn("[Mizan] hydrate failed (offline data kept):", err);
+        });
       },
 
       markPasswordChanged: () => {

@@ -28,20 +28,39 @@ export default defineConfig({
         devOptions: { enabled: false },
         workbox: {
           globPatterns: ["**/*.{js,css,woff2,png,svg,ico,html}"],
-          navigateFallback: "/offline.html",
-          navigateFallbackDenylist: [/^\/api\//, /^\/~oauth/],
+          // مهم: لا نستخدم navigateFallback هنا. في generateSW يُسجَّل NavigationRoute
+          // الخاص به قبل runtimeCaching، فيبتلع كل تنقّل أوفلاين ويعرض offline.html
+          // حتى لو كانت نسخة الصفحة محفوظة. بدلاً من ذلك نتعامل مع التنقّل عبر
+          // NetworkFirst أدناه، وoffline.html يبقى fallback أخيراً فقط.
+          // "" يمنع vite-plugin-pwa من حقن navigateFallback الافتراضي (index.html)
+          // وهو غير موجود أصلاً في تطبيق SSR.
+          navigateFallback: "",
           additionalManifestEntries: [{ url: "/offline.html", revision: null }],
           cleanupOutdatedCaches: true,
           clientsClaim: true,
           skipWaiting: true,
           runtimeCaching: [
             {
-              urlPattern: ({ request }) => request.mode === "navigate",
+              urlPattern: ({ request, url, sameOrigin }) =>
+                request.mode === "navigate" &&
+                !!sameOrigin &&
+                !url.pathname.startsWith("/api/") &&
+                !url.pathname.startsWith("/~oauth"),
               handler: "NetworkFirst",
               options: {
                 cacheName: "mizan-pages",
                 networkTimeoutSeconds: 5,
                 expiration: { maxEntries: 50 },
+                cacheableResponse: { statuses: [200] },
+                matchOptions: { ignoreVary: true },
+                plugins: [
+                  {
+                    // لا توجد نسخة محفوظة لهذا المسار ولا شبكة → offline.html.
+                    handlerDidError: async () =>
+                      (await caches.match("/offline.html", { ignoreSearch: true })) ??
+                      Response.error(),
+                  },
+                ],
               },
             },
             {
