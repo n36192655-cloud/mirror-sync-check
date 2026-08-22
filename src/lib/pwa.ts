@@ -29,6 +29,38 @@ async function unregisterAppSw() {
   );
 }
 
+/** المسارات الميدانية التي يجب أن تُفتح بعد Refresh دون إنترنت. */
+const FIELD_ROUTES = ["/", "/readings"];
+
+const PAGES_CACHE = "mizan-pages";
+
+/**
+ * تسخين كاش التنقّل: يجلب نسخة SSR لكل مسار ميداني ويضعها في نفس الكاش الذي
+ * يقرأ منه Service Worker (NetworkFirst → cache)، فيصبح Refresh أوفلاين
+ * لهذه المسارات مخدوماً محلياً بدل offline.html.
+ */
+async function warmFieldRoutes(): Promise<void> {
+  if (typeof caches === "undefined" || !navigator.onLine) return;
+  try {
+    const cache = await caches.open(PAGES_CACHE);
+    for (const path of FIELD_ROUTES) {
+      try {
+        const res = await fetch(path, {
+          credentials: "same-origin",
+          headers: { accept: "text/html" },
+        });
+        if (res.ok && (res.headers.get("content-type") ?? "").includes("text/html")) {
+          await cache.put(path, res.clone());
+        }
+      } catch {
+        /* بلا شبكة أو مسار غير متاح — يُتجاهل بصمت */
+      }
+    }
+  } catch {
+    /* الكاش غير متاح — لا يؤثر على التطبيق */
+  }
+}
+
 export function registerAppServiceWorker(): void {
   if (typeof window === "undefined" || !("serviceWorker" in navigator)) return;
 
@@ -44,8 +76,12 @@ export function registerAppServiceWorker(): void {
   }
 
   window.addEventListener("load", () => {
-    void navigator.serviceWorker.register(SW_URL, { scope: "/" }).catch((err) => {
-      console.warn("[Mizan] service worker registration failed:", err);
-    });
+    void navigator.serviceWorker
+      .register(SW_URL, { scope: "/" })
+      .then(() => navigator.serviceWorker.ready)
+      .then(() => warmFieldRoutes())
+      .catch((err) => {
+        console.warn("[Mizan] service worker registration failed:", err);
+      });
   });
 }
