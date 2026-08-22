@@ -32,6 +32,9 @@ export default defineConfig({
           // الخاص به قبل runtimeCaching، فيبتلع كل تنقّل أوفلاين ويعرض offline.html
           // حتى لو كانت نسخة الصفحة محفوظة. بدلاً من ذلك نتعامل مع التنقّل عبر
           // NetworkFirst أدناه، وoffline.html يبقى fallback أخيراً فقط.
+          // "" يمنع vite-plugin-pwa من حقن navigateFallback الافتراضي (index.html)
+          // وهو غير موجود أصلاً في تطبيق SSR.
+          navigateFallback: "",
           additionalManifestEntries: [{ url: "/offline.html", revision: null }],
           cleanupOutdatedCaches: true,
           clientsClaim: true,
