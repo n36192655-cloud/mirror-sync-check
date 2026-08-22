@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMemo, useRef, useState } from "react";
-import { useStore } from "@/lib/store";
+import { useStore, computeNrw } from "@/lib/store";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -62,24 +62,11 @@ function LossAnalysisPage() {
   }
 
   const analytics = useMemo(() => {
-    const fromT = new Date(from).getTime();
-    const toT = new Date(to).getTime() + 24 * 3600 * 1000 - 1;
-    
-    const inRange = (d: string) => {
-      const t = new Date(d).getTime();
-      return t >= fromT && t <= toT;
-    };
-    
-    const waterMeters = new Set(meters.map((m) => m.id));
-    
-    // تحسين الأداء: دمج العمليات في حلقة reduce واحدة مباشرة لتوفير الذاكرة والمعالجة
-    const produced = productionLogs.reduce((acc, p) => inRange(p.date) ? acc + p.units : acc, 0);
-    const consumed = readings.reduce((acc, r) => (waterMeters.has(r.meter_id) && inRange(r.date)) ? acc + r.consumption : acc, 0);
-    
-    const loss = Math.max(0, produced - consumed);
-    const pct = produced > 0 ? (loss / produced) * 100 : 0;
-    
-    return { produced, consumed, loss, pct };
+    // تعريف موحّد للفاقد ومصدر موحّد للاستهلاك (القراءات المعتمدة فقط)
+    // — نفس الدالة التي تستخدمها لوحة الاستدامة.
+    const knownMeters = new Set(meters.map((m) => m.id));
+    const scopedReadings = readings.filter((r) => knownMeters.has(r.meter_id));
+    return computeNrw(productionLogs, scopedReadings, { from, to });
   }, [productionLogs, readings, meters, from, to]);
 
   // تحسين الأداء: تغليف بيانات المخطط بـ useMemo لمنع الـ Re-render غير المبرر للمكون الرسومي
@@ -147,7 +134,7 @@ function LossAnalysisPage() {
               <Tooltip formatter={(v: number) => fmtNum(v)} />
               <Legend />
               <Bar dataKey="produced" name="مُنتج" fill="var(--water)" radius={[4, 4, 0, 0]} />
-              <Bar dataKey="consumed" name="مُستهلك" fill="#0ea5e9" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="consumed" name="مُستهلك معتمد" fill="#0ea5e9" radius={[4, 4, 0, 0]} />
               <Bar dataKey="loss" name="فاقد" fill="#dc2626" radius={[4, 4, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
