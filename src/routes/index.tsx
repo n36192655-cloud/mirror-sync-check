@@ -1,6 +1,12 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo } from "react";
-import { useStore, billBalance } from "@/lib/store";
+import {
+  useStore,
+  computeNrw,
+  computeFinancials,
+  isOfficialReading,
+  readingVolume,
+} from "@/lib/store";
 import { fmtYER, fmtNum } from "@/lib/pricing";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -49,73 +55,58 @@ function Dashboard() {
   }, [hydrateFromSupabase]);
 
   const k = useMemo(() => {
-    // Financial
-    const paidBills = bills.filter((b) => b.status === "paid");
-    const unpaidBills = bills.filter((b) => b.status !== "paid");
-    const totalBilled = bills.reduce((a, b) => a + b.total, 0);
-    const totalCollected =
-      bills.reduce((a, b) => a + (b.paid ?? 0), 0);
-    // المستحق = المتبقي الفعلي على كل فاتورة (نفس معادلة الخادم)، وليس إجمالي الفاتورة.
-    const outstanding = unpaidBills.reduce((a, b) => a + billBalance(b, payments), 0);
-    const collectionRate = totalBilled > 0 ? (totalCollected / totalBilled) * 100 : 0;
+    // مؤشرات مالية موحّدة (نفس معادلة الخادم، بلا احتساب مزدوج للدفعات)
+    const fin = computeFinancials(bills, payments);
 
-    // Water production vs consumption (NRW = Non-Revenue Water)
-    const produced = productionLogs.reduce((a, p) => a + p.units, 0);
-    const consumed = readings.reduce((a, r) => a + Math.max(0, r.consumption), 0);
-    const billedVolume = bills.reduce((a, b) => {
-      // approximate billed volume via reading linked to bill
-      const r = readings.find((x) => x.id === b.reading_id);
-      return a + (r ? Math.max(0, r.consumption) : 0);
-    }, 0);
-    const nrwVolume = Math.max(0, produced - billedVolume);
-    const nrwPct = produced > 0 ? (nrwVolume / produced) * 100 : 0;
-    const efficiencyPct = Math.max(0, 100 - nrwPct);
+    // الفاقد (NRW) — نفس التعريف والمصدر المستخدمين في صفحة تحليل الفاقد
+    const nrw = computeNrw(productionLogs, readings);
 
-    // Consumption behavior
+    // سلوك الاستهلاك — القراءات المعتمدة فقط هي المصدر الرسمي
+    const official = readings.filter(isOfficialReading);
     const suspicious = readings.filter((r) => r.flag !== "ok");
-    const okReadings = readings.filter((r) => r.flag === "ok");
+    const okReadings = official.filter((r) => r.flag === "ok");
     const avgConsumption =
       okReadings.length > 0
-        ? okReadings.reduce((a, r) => a + r.consumption, 0) / okReadings.length
+        ? okReadings.reduce((a, r) => a + readingVolume(r), 0) / okReadings.length
         : 0;
 
-    // Daily per subscriber (assume monthly reading cycle → /30)
+    // متوسط الفرد اليومي (دورة قراءة شهرية → /30)
     const activeSubs = customers.filter((c) => c.status !== "rejected").length || customers.length;
-    const totalConsumed30d = consumed; // simplification: dataset total
-    const perCapitaDaily = activeSubs > 0 ? totalConsumed30d / activeSubs / 30 : 0;
+    const perCapitaDaily = activeSubs > 0 ? nrw.consumed / activeSubs / 30 : 0;
 
-    // Consumption categories
+    // تصنيف الاستهلاك — على القراءات المعتمدة فقط ليتطابق مع المتوسط أعلاه
     const buckets = { normal: 0, high: 0, waste: 0 };
-    readings.forEach((r) => {
+    official.forEach((r) => {
+      const v = readingVolume(r);
       if (avgConsumption <= 0) {
         buckets.normal++;
         return;
       }
-      if (r.consumption > avgConsumption * 2) buckets.waste++;
-      else if (r.consumption > avgConsumption * 1.2) buckets.high++;
+      if (v > avgConsumption * 2) buckets.waste++;
+      else if (v > avgConsumption * 1.2) buckets.high++;
       else buckets.normal++;
     });
 
     return {
-      produced,
-      consumed,
-      billedVolume,
-      nrwVolume,
-      nrwPct,
-      efficiencyPct,
-      collectionRate,
-      totalCollected,
-      outstanding,
-      paidBills: paidBills.length,
-      unpaidBills: unpaidBills.length,
+      produced: nrw.produced,
+      consumed: nrw.consumed,
+      nrwVolume: nrw.loss,
+      nrwPct: nrw.pct,
+      efficiencyPct: nrw.efficiencyPct,
+      collectionRate: fin.collectionRate,
+      totalCollected: fin.totalCollected,
+      outstanding: fin.outstanding,
+      paidBills: fin.paidBills,
+      unpaidBills: fin.unpaidBills,
       paymentsCount: counts.payments || payments.length,
       avgConsumption,
       perCapitaDaily,
       subscribers: counts.customers || customers.length,
+      officialReadings: official.length,
       suspiciousCount: suspicious.length,
       buckets,
     };
-  }, [customers, meters, readings, bills, payments, productionLogs, counts]);
+  }, [customers, readings, bills, payments, productionLogs, counts]);
 
   const productionChart = useMemo(() => {
     // group by month (YYYY-MM) using productionLogs vs readings consumption
@@ -127,10 +118,10 @@ function Dashboard() {
       row.produced += p.units;
       map.set(k, row);
     });
-    readings.forEach((r) => {
+    readings.filter(isOfficialReading).forEach((r) => {
       const k = keyOf(r.date);
       const row = map.get(k) ?? { month: k, produced: 0, consumed: 0 };
-      row.consumed += Math.max(0, r.consumption);
+      row.consumed += readingVolume(r);
       map.set(k, row);
     });
     return Array.from(map.values())
@@ -197,7 +188,7 @@ function Dashboard() {
             </div>
           </div>
           <div className="grid grid-cols-2 gap-2 mt-3 text-[11px]">
-            <MiniStat label="قراءات منتظمة" value={fmtNum(Math.max(0, (counts.readings || readings.length) - k.suspiciousCount))} />
+            <MiniStat label="قراءات معتمدة منتظمة" value={fmtNum(k.officialReadings)} />
             <MiniStat label="قراءات شاذة" value={fmtNum(k.suspiciousCount)} danger={k.suspiciousCount > 0} />
           </div>
         </KpiCard>
@@ -272,7 +263,7 @@ function Dashboard() {
                   <Tooltip formatter={(v: number) => `${fmtNum(v)} م³`} />
                   <Legend />
                   <Bar dataKey="produced" name="مُنتج" fill="hsl(199 89% 48%)" radius={[4, 4, 0, 0]} />
-                  <Bar dataKey="consumed" name="مُستهلَك مُفوتَر" fill="hsl(142 71% 45%)" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="consumed" name="مُستهلَك معتمد" fill="hsl(142 71% 45%)" radius={[4, 4, 0, 0]} />
                   <Bar dataKey="loss" name="فاقد" fill="hsl(0 84% 60%)" radius={[4, 4, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
@@ -288,7 +279,7 @@ function Dashboard() {
             </CardTitle>
           </CardHeader>
           <CardContent className="h-72">
-            {readings.length === 0 ? (
+            {k.officialReadings === 0 ? (
               <EmptyState text="لا توجد قراءات بعد." />
             ) : (
               <ResponsiveContainer width="100%" height="100%">
