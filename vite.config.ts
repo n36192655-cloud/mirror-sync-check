@@ -49,6 +49,7 @@ export default defineConfig({
                 networkTimeoutSeconds: 5,
                 expiration: { maxEntries: 50 },
                 cacheableResponse: { statuses: [200] },
+                matchOptions: { ignoreVary: true },
                 plugins: [
                   {
                     // لا توجد نسخة محفوظة لهذا المسار ولا شبكة → offline.html.
