@@ -131,7 +131,7 @@ function ReadingsPage() {
         .select("meter_id, customer_id, ended_at, meters(serial)")
         .is("ended_at", null),
     ]);
-    if (cs.error) toast.error("تعذّر جلب المشتركين");
+    if (cs.error) toast.error(`تعذّر جلب المشتركين: ${cs.error.message}`);
     else setCustomers(cs.data ?? []);
     if (!rs.error) setReadings(rs.data ?? []);
     if (!bs.error) setBills(bs.data ?? []);
