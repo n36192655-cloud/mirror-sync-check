@@ -8,6 +8,8 @@ import { CopyrightFooter } from "./footer";
 import { syncPending, useOnlineStatus } from "@/lib/sync";
 import { useStore } from "@/lib/store";
 import { supabase } from "@/integrations/supabase/client";
+import { toast } from "sonner";
+
 
 
 type NavItem = { to: string; label: string; icon: typeof LayoutDashboard; roles: Role[] };
