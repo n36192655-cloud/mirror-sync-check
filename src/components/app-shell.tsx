@@ -8,6 +8,8 @@ import { CopyrightFooter } from "./footer";
 import { syncPending, useOnlineStatus } from "@/lib/sync";
 import { useStore } from "@/lib/store";
 import { supabase } from "@/integrations/supabase/client";
+import { toast } from "sonner";
+
 
 
 type NavItem = { to: string; label: string; icon: typeof LayoutDashboard; roles: Role[] };
@@ -25,10 +27,10 @@ const NAV: NavItem[] = [
   { to: "/profile", label: "حسابي", icon: User, roles: ["super_admin", "manager", "reader", "collector"] },
 ];
 
-function hydrateFailed(err: unknown) {
-  // فشل جلب البيانات من السحابة (شبكة/توكن) لا يُفسد اللقطة المحلية ولا الطابور.
-  console.warn("[Mizan] hydrate failed (offline data kept):", err);
+function isSessionMissing(err: unknown): boolean {
+  return err instanceof Error && err.name === "SessionMissingError";
 }
+
 
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
@@ -60,11 +62,24 @@ export function AppShell({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!user) return;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    const onHydrateError = (err: unknown) => {
+      console.warn("[Mizan] hydrate failed:", err);
+      if (isSessionMissing(err)) {
+        // جلسة منتهية: لا نعرض واجهة صفرية وكأنها بيانات صحيحة.
+        toast.error("انتهت جلسة الدخول — سجّل الدخول مرة أخرى");
+        void logout().then(() => navigate({ to: "/login", replace: true }));
+        return;
+      }
+      if (typeof navigator !== "undefined" && navigator.onLine) {
+        toast.error(err instanceof Error ? err.message : "تعذّر تحميل البيانات من الخادم");
+      }
+    };
     const refresh = () => {
       if (timer) clearTimeout(timer);
-      timer = setTimeout(() => { void useStore.getState().hydrateFromSupabase().catch(hydrateFailed); }, 400);
+      timer = setTimeout(() => { void useStore.getState().hydrateFromSupabase().catch(onHydrateError); }, 400);
     };
-    void useStore.getState().hydrateFromSupabase().catch(hydrateFailed);
+    void useStore.getState().hydrateFromSupabase().catch(onHydrateError);
+
     const channel = supabase
       .channel("mizan-live")
       .on("postgres_changes", { event: "*", schema: "public", table: "customers" }, refresh)
