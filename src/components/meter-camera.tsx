@@ -81,7 +81,9 @@ export const MeterCamera: React.FC<MeterCameraProps> = ({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [isCameraActive, setIsCameraActive] = useState<boolean>(false);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(initialPreview || null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(
+    initialPreview || null
+  );
   const [error, setError] = useState<string | null>(null);
   const [isCompressing, setIsCompressing] = useState<boolean>(false);
 
@@ -111,6 +113,7 @@ export const MeterCamera: React.FC<MeterCameraProps> = ({
 
   const startCamera = async () => {
     setError(null);
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
@@ -121,19 +124,34 @@ export const MeterCamera: React.FC<MeterCameraProps> = ({
         audio: false,
       });
 
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
-        setIsCameraActive(true);
-      }
+      // إظهار عنصر video أولاً حتى يصبح videoRef.current متاحًا
+      setIsCameraActive(true);
+
+      // ربط الـstream بعد إعادة الرندر
+      setTimeout(() => {
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+
+          videoRef.current.play().catch((err) => {
+            console.error("Camera preview play error:", err);
+          });
+        } else {
+          // إيقاف البث إذا لم يظهر عنصر الفيديو
+          stream.getTracks().forEach((track) => track.stop());
+        }
+      }, 0);
     } catch (err) {
       console.error("Camera access error:", err);
-      setError("تعذر فتح الكاميرا الميدانية. يرجى التأكد من صلاحيات الكاميرا أو استخدام صورة من المعرض.");
+
+      setError(
+        "تعذر فتح الكاميرا الميدانية. يرجى التأكد من صلاحيات الكاميرا أو استخدام صورة من المعرض."
+      );
     }
   };
 
   const capturePhoto = useCallback(async () => {
     if (!videoRef.current) return;
+
     setIsCompressing(true);
     setError(null);
 
@@ -142,7 +160,11 @@ export const MeterCamera: React.FC<MeterCameraProps> = ({
       const width = video.videoWidth || 1280;
       const height = video.videoHeight || 720;
 
-      const { file, previewUrl: newPreview } = await compressImage(video, width, height);
+      const { file, previewUrl: newPreview } = await compressImage(
+        video,
+        width,
+        height
+      );
 
       cleanupPreview();
       setPreviewUrl(newPreview);
@@ -163,7 +185,11 @@ export const MeterCamera: React.FC<MeterCameraProps> = ({
     // حماية مؤكدة من اختيار ملفات غير الصور
     if (!selectedFile.type.startsWith("image/")) {
       setError("يرجى اختيار ملف صورة صالح (JPG, PNG, WEBP).");
-      if (fileInputRef.current) fileInputRef.current.value = "";
+
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+
       return;
     }
 
@@ -180,6 +206,7 @@ export const MeterCamera: React.FC<MeterCameraProps> = ({
           img.naturalWidth || 1280,
           img.naturalHeight || 720
         );
+
         URL.revokeObjectURL(objectUrl);
 
         cleanupPreview();
@@ -191,7 +218,10 @@ export const MeterCamera: React.FC<MeterCameraProps> = ({
         setError("تعذر معالجة وضغط الصورة المختارة.");
       } finally {
         setIsCompressing(false);
-        if (fileInputRef.current) fileInputRef.current.value = "";
+
+        if (fileInputRef.current) {
+          fileInputRef.current.value = "";
+        }
       }
     };
 
@@ -199,7 +229,10 @@ export const MeterCamera: React.FC<MeterCameraProps> = ({
       URL.revokeObjectURL(objectUrl);
       setIsCompressing(false);
       setError("تعذر تحميل ملف الصورة المحدد. يرجى اختيار ملف صورة آخر.");
-      if (fileInputRef.current) fileInputRef.current.value = "";
+
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
     };
 
     img.src = objectUrl;
@@ -209,7 +242,10 @@ export const MeterCamera: React.FC<MeterCameraProps> = ({
     cleanupPreview();
     setPreviewUrl(null);
     setError(null);
-    if (onClear) onClear();
+
+    if (onClear) {
+      onClear();
+    }
   };
 
   return (
@@ -232,6 +268,7 @@ export const MeterCamera: React.FC<MeterCameraProps> = ({
             <Camera className="w-4 h-4" />
             فتح الكاميرا للالتقاط
           </Button>
+
           <Button
             type="button"
             variant="outline"
@@ -242,6 +279,7 @@ export const MeterCamera: React.FC<MeterCameraProps> = ({
             <Upload className="w-4 h-4" />
             اختيار صورة من المعرض
           </Button>
+
           <input
             ref={fileInputRef}
             type="file"
@@ -254,7 +292,13 @@ export const MeterCamera: React.FC<MeterCameraProps> = ({
 
       {isCameraActive && (
         <div className="relative w-full max-w-md overflow-hidden rounded-lg bg-black aspect-video flex items-center justify-center">
-          <video ref={videoRef} className="w-full h-full object-cover" playsInline muted />
+          <video
+            ref={videoRef}
+            className="w-full h-full object-cover"
+            playsInline
+            muted
+          />
+
           <div className="absolute bottom-4 flex gap-4">
             <Button
               type="button"
@@ -266,6 +310,7 @@ export const MeterCamera: React.FC<MeterCameraProps> = ({
               <Check className="w-4 h-4" />
               {isCompressing ? "جاري الضغط..." : "التقاط القراءة"}
             </Button>
+
             <Button
               type="button"
               onClick={stopCamera}
@@ -281,8 +326,13 @@ export const MeterCamera: React.FC<MeterCameraProps> = ({
       {previewUrl && (
         <div className="flex flex-col items-center gap-3 w-full max-w-md">
           <div className="relative w-full aspect-video rounded-lg overflow-hidden border">
-            <img src={previewUrl} alt="معاينة صورة العداد" className="w-full h-full object-cover" />
+            <img
+              src={previewUrl}
+              alt="معاينة صورة العداد"
+              className="w-full h-full object-cover"
+            />
           </div>
+
           <Button
             type="button"
             onClick={handleReset}
