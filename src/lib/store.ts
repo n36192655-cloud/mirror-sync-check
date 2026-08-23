@@ -5,6 +5,25 @@ import { supabase } from "@/integrations/supabase/client";
 import { useTariff } from "./tariff";
 
 /**
+ * خطأ انتهاء/غياب جلسة Supabase. الواجهة لا يجوز أن تعرض بيانات فارغة
+ * وكأنها صحيحة عندما تكون الجلسة مفقودة — يجب إعادة المستخدم لتسجيل الدخول.
+ */
+export class SessionMissingError extends Error {
+  constructor() {
+    super("انتهت جلسة الدخول — سجّل الدخول مرة أخرى لعرض البيانات");
+    this.name = "SessionMissingError";
+  }
+}
+
+/** خطأ حقيقي من قاعدة البيانات (RLS/صلاحيات/شبكة) — يُرفع ولا يُبتلع. */
+export class DataLoadError extends Error {
+  constructor(table: string, detail: string) {
+    super(`تعذّر تحميل «${table}» من الخادم: ${detail}`);
+    this.name = "DataLoadError";
+  }
+}
+
+/**
  * PostgREST يفرض حدًّا افتراضيًا (1000 صف) على كل استعلام. عند تجاوز أي جدول
  * هذا الحد كانت الصفوف الأحدث تختفي من الواجهة تمامًا. هذا المُحمِّل يجلب كل
  * الصفوف على دفعات مرتبة تصاعديًا بمفتاح ثابت — لا حدود، ولا بيانات مخفية.
@@ -23,8 +42,9 @@ async function fetchAll<T = Record<string, unknown>>(
       .order("id", { ascending: true })
       .range(from, from + PAGE - 1);
     if (error) {
+      // لا نُرجع [] بصمت: مصفوفة فارغة تُقرأ في الواجهة كـ«لا توجد بيانات».
       console.error(`[Mizan] fetchAll(${table}) failed:`, error.message);
-      break;
+      throw new DataLoadError(table, error.message);
     }
     const rows = (data ?? []) as unknown as T[];
     out.push(...rows);
@@ -38,9 +58,11 @@ async function countRows(table: string): Promise<number> {
   const { count, error } = await supabase
     .from(table as never)
     .select("id", { count: "exact", head: true });
-  if (error) return 0;
+  if (error) throw new DataLoadError(table, error.message);
   return count ?? 0;
 }
+
+
 
 
 export type ApprovalStatus = "pending" | "approved" | "rejected";
