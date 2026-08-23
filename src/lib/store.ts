@@ -465,8 +465,13 @@ export const useStore = create<State>()(
 
 
       hydrateFromSupabase: async () => {
-        const { data: userData } = await supabase.auth.getUser();
-        if (!userData?.user) return;
+        // جلسة Supabase حقيقية شرط لأي قراءة: بدونها كل الطلبات تُنفَّذ كـ anon
+        // فتُرفض بـ permission denied وتظهر الواجهة صفرية بلا سبب واضح.
+        const { data: sessionData } = await supabase.auth.getSession();
+        if (!sessionData?.session?.access_token) throw new SessionMissingError();
+        const { data: userData, error: userErr } = await supabase.auth.getUser();
+        if (userErr || !userData?.user) throw new SessionMissingError();
+
         /* eslint-disable @typescript-eslint/no-explicit-any */
         const [cs, ms, mas, rs, bs, ps, pl, counts] = await Promise.all([
           fetchAll<any>("customers", "created_at"),
