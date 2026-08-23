@@ -79,21 +79,25 @@ export const MeterCamera: React.FC<MeterCameraProps> = ({
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
 
   const [isCameraActive, setIsCameraActive] = useState<boolean>(false);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(
-    initialPreview || null
-  );
+  const [previewUrl, setPreviewUrl] = useState<string | null>(initialPreview || null);
   const [error, setError] = useState<string | null>(null);
   const [isCompressing, setIsCompressing] = useState<boolean>(false);
 
   // إيقاف بث الكاميرا وتفريغ الموارد
   const stopCamera = useCallback(() => {
-    if (videoRef.current && videoRef.current.srcObject) {
-      const stream = videoRef.current.srcObject as MediaStream;
-      stream.getTracks().forEach((track) => track.stop());
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+
+    if (videoRef.current) {
+      videoRef.current.pause();
       videoRef.current.srcObject = null;
     }
+
     setIsCameraActive(false);
   }, []);
 
@@ -115,6 +119,11 @@ export const MeterCamera: React.FC<MeterCameraProps> = ({
     setError(null);
 
     try {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error("CAMERA_API_UNAVAILABLE");
+      }
+
+      // الحصول على بث الكاميرا أولًا
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: "environment",
@@ -124,22 +133,10 @@ export const MeterCamera: React.FC<MeterCameraProps> = ({
         audio: false,
       });
 
-      // إظهار عنصر video أولاً حتى يصبح videoRef.current متاحًا
+      streamRef.current = stream;
+
+      // تشغيل وضع الكاميرا أولًا حتى يتم رسم عنصر video
       setIsCameraActive(true);
-
-      // ربط الـstream بعد إعادة الرندر
-      setTimeout(() => {
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-
-          videoRef.current.play().catch((err) => {
-            console.error("Camera preview play error:", err);
-          });
-        } else {
-          // إيقاف البث إذا لم يظهر عنصر الفيديو
-          stream.getTracks().forEach((track) => track.stop());
-        }
-      }, 0);
     } catch (err) {
       console.error("Camera access error:", err);
 
@@ -148,6 +145,34 @@ export const MeterCamera: React.FC<MeterCameraProps> = ({
       );
     }
   };
+
+  // بعد ظهور عنصر video فعليًا، نربط به الـstream ونبدأ المعاينة
+  useEffect(() => {
+    if (!isCameraActive || !videoRef.current || !streamRef.current) {
+      return;
+    }
+
+    const video = videoRef.current;
+    const stream = streamRef.current;
+
+    video.srcObject = stream;
+
+    video
+      .play()
+      .catch((err) => {
+        console.error("Camera preview play error:", err);
+        setError(
+          "تعذر تشغيل معاينة الكاميرا. يرجى التأكد من صلاحيات الكاميرا ثم المحاولة مرة أخرى."
+        );
+      });
+
+    return () => {
+      if (video.srcObject === stream) {
+        video.pause();
+        video.srcObject = null;
+      }
+    };
+  }, [isCameraActive]);
 
   const capturePhoto = useCallback(async () => {
     if (!videoRef.current) return;
@@ -185,11 +210,7 @@ export const MeterCamera: React.FC<MeterCameraProps> = ({
     // حماية مؤكدة من اختيار ملفات غير الصور
     if (!selectedFile.type.startsWith("image/")) {
       setError("يرجى اختيار ملف صورة صالح (JPG, PNG, WEBP).");
-
-      if (fileInputRef.current) {
-        fileInputRef.current.value = "";
-      }
-
+      if (fileInputRef.current) fileInputRef.current.value = "";
       return;
     }
 
@@ -206,7 +227,6 @@ export const MeterCamera: React.FC<MeterCameraProps> = ({
           img.naturalWidth || 1280,
           img.naturalHeight || 720
         );
-
         URL.revokeObjectURL(objectUrl);
 
         cleanupPreview();
@@ -218,10 +238,7 @@ export const MeterCamera: React.FC<MeterCameraProps> = ({
         setError("تعذر معالجة وضغط الصورة المختارة.");
       } finally {
         setIsCompressing(false);
-
-        if (fileInputRef.current) {
-          fileInputRef.current.value = "";
-        }
+        if (fileInputRef.current) fileInputRef.current.value = "";
       }
     };
 
@@ -229,10 +246,7 @@ export const MeterCamera: React.FC<MeterCameraProps> = ({
       URL.revokeObjectURL(objectUrl);
       setIsCompressing(false);
       setError("تعذر تحميل ملف الصورة المحدد. يرجى اختيار ملف صورة آخر.");
-
-      if (fileInputRef.current) {
-        fileInputRef.current.value = "";
-      }
+      if (fileInputRef.current) fileInputRef.current.value = "";
     };
 
     img.src = objectUrl;
@@ -242,10 +256,7 @@ export const MeterCamera: React.FC<MeterCameraProps> = ({
     cleanupPreview();
     setPreviewUrl(null);
     setError(null);
-
-    if (onClear) {
-      onClear();
-    }
+    if (onClear) onClear();
   };
 
   return (
