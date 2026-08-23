@@ -25,10 +25,10 @@ const NAV: NavItem[] = [
   { to: "/profile", label: "حسابي", icon: User, roles: ["super_admin", "manager", "reader", "collector"] },
 ];
 
-function hydrateFailed(err: unknown) {
-  // فشل جلب البيانات من السحابة (شبكة/توكن) لا يُفسد اللقطة المحلية ولا الطابور.
-  console.warn("[Mizan] hydrate failed (offline data kept):", err);
+function isSessionMissing(err: unknown): boolean {
+  return err instanceof Error && err.name === "SessionMissingError";
 }
+
 
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
