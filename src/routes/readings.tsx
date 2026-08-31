@@ -1,5 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useState, useEffect, useMemo, useCallback } from "react";
+import { useServerFn } from "@tanstack/react-start";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/lib/auth";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -14,11 +15,13 @@ import {
   Check, X, Image as ImageIcon, Loader2, RefreshCw,
 } from "lucide-react";
 import { fmtYER } from "@/lib/pricing";
-import { MeterCamera } from "@/components/meter-camera";
+import { MeterCamera, type MeterRoi } from "@/components/meter-camera";
+import { readMeterPhoto } from "@/lib/meter-ocr.functions";
 import { getGeoFix, type GeoFix } from "@/lib/geolocation";
 import { addPending, useOfflineQueue, syncPending, isUnsynced, type PendingReading } from "@/lib/sync";
 import { readFieldCache, saveFieldCache, requestPersistentStorage } from "@/lib/offline-db";
 import type { Database } from "@/integrations/supabase/types";
+
 
 type CustomerRow = Database["public"]["Tables"]["customers"]["Row"];
 type ReadingRow = Database["public"]["Tables"]["water_readings"]["Row"];
