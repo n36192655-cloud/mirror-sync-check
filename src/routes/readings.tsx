@@ -74,6 +74,12 @@ function ReadingsPage() {
   const [photoBlob, setPhotoBlob] = useState<Blob | null>(null);
   const [photoPreview, setPhotoPreview] = useState<string | undefined>();
   const [ocrSerial, setOcrSerial] = useState<string | undefined>();
+  const [ocrBusy, setOcrBusy] = useState(false);
+  const [ocrStatus, setOcrStatus] = useState<
+    { state: "VALID" | "AMBIGUOUS" | "INVALID" | "SKIPPED"; message: string; value?: number } | null
+  >(null);
+  const runMeterOcr = useServerFn(readMeterPhoto);
+
   const [geo, setGeo] = useState<GeoFix | null>(null);
   const [geoBusy, setGeoBusy] = useState(false);
   const [saving, setSaving] = useState(false);
