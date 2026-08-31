@@ -373,7 +373,7 @@ function ReadingsPage() {
 
   function resetForm() {
     setCurrent(""); setPhotoBlob(null); setPhotoPreview(undefined);
-    setOcrSerial(undefined); setGeo(null);
+    setOcrSerial(undefined); setOcrStatus(null); setGeo(null);
     setReadingDate(new Date().toISOString().slice(0, 10));
   }
 
@@ -383,11 +383,13 @@ function ReadingsPage() {
     if (!selectedMeter) return toast.error("لا يوجد عداد مرتبط بهذا المشترك");
     if (current === "" || Number.isNaN(+current)) return toast.error("أدخل القراءة الحالية");
 
+    // تنبيه فقط: اختلاف الرقم التسلسلي المستخرج لا يمنع حفظ قراءة الاستهلاك.
     if (ocrSerial &&
         ocrSerial.replace(/[-\s]/g, "").toUpperCase() !==
         meterNumber.replace(/[-\s]/g, "").toUpperCase()) {
-      return toast.error(`رفض: رقم العداد الملتقط (${ocrSerial}) لا يطابق (${meterNumber})`);
+      toast.warning(`تنبيه: الرقم التسلسلي الملتقط (${ocrSerial}) لا يطابق (${meterNumber})`);
     }
+
 
     let fix = geo;
     if (!fix && isReader) {
