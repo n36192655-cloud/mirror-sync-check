@@ -575,7 +575,35 @@ function ReadingsPage() {
               <div>
                 <Label>القراءة الحالية</Label>
                 <Input type="number" value={current} onChange={(e) => setCurrent(e.target.value)} />
+                {ocrBusy && (
+                  <p className="text-[11px] text-muted-foreground mt-1 flex items-center gap-1">
+                    <Loader2 className="w-3 h-3 animate-spin" /> جارٍ قراءة العداد آلياً من الصورة…
+                  </p>
+                )}
+                {!ocrBusy && ocrStatus && (
+                  <p
+                    className={`text-[11px] mt-1 ${
+                      ocrStatus.state === "VALID"
+                        ? "text-emerald-600"
+                        : ocrStatus.state === "INVALID"
+                          ? "text-destructive"
+                          : "text-amber-600"
+                    }`}
+                  >
+                    {ocrStatus.message}
+                    {ocrStatus.state === "AMBIGUOUS" && ocrStatus.value !== undefined && (
+                      <button
+                        type="button"
+                        className="underline ms-2"
+                        onClick={() => setCurrent(String(ocrStatus.value))}
+                      >
+                        استخدام {ocrStatus.value} يدوياً
+                      </button>
+                    )}
+                  </p>
+                )}
               </div>
+
             </div>
 
             <div className="grid md:grid-cols-2 gap-3">
