@@ -255,17 +255,110 @@ function ReadingsPage() {
     if (!m) toast.error("لا يوجد عداد مرتبط بهذا المشترك — اربط عداداً من صفحة المشتركين");
   }
 
-  function handleCapture(file: File, previewUrl: string) {
+  /** تحويل الصورة الأصلية إلى data URL لإرسالها كسياق للنموذج (الأصل يبقى كما هو للحفظ). */
+  function blobToDataUrl(blob: Blob): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onload = () => resolve(String(fr.result));
+      fr.onerror = () => reject(new Error("تعذّر قراءة الصورة"));
+      fr.readAsDataURL(blob);
+    });
+  }
+
+  /** متوسط الاستهلاك المعتمد لهذا العداد — يُستخدم كطبقة تحقق فقط (نفس قاعدة الخادم: قفزة > 3×). */
+  const avgConsumption = useMemo(() => {
+    if (!meterId) return 0;
+    const vals = readings
+      .filter((r) => r.meter_id === meterId && r.status === "approved" && typeof r.consumption === "number")
+      .map((r) => Number(r.consumption));
+    if (vals.length === 0) return 0;
+    return vals.reduce((a, b) => a + b, 0) / vals.length;
+  }, [readings, meterId]);
+
+  async function handleCapture(file: File, previewUrl: string, roi?: MeterRoi) {
     setPhotoBlob(file);
     setPhotoPreview(previewUrl);
     setOcrSerial(undefined);
+    setOcrStatus(null);
     toast.success("تم إرفاق صورة العداد");
+
+    if (!roi) {
+      setOcrStatus({ state: "SKIPPED", message: "تعذّر اقتصاص منطقة القراءة — أدخل القراءة يدوياً" });
+      return;
+    }
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      setOcrStatus({ state: "SKIPPED", message: "لا يوجد اتصال — القراءة الآلية غير متاحة، أدخل القراءة يدوياً" });
+      return;
+    }
+
+    setOcrBusy(true);
+    try {
+      const fullImage = await blobToDataUrl(file).catch(() => undefined);
+      const res = await runMeterOcr({
+        data: fullImage ? { roiImage: roi.dataUrl, fullImage } : { roiImage: roi.dataUrl },
+      });
+
+      if (res.serial) setOcrSerial(res.serial);
+
+      if (!res.roiFound || res.readingValue === null) {
+        setOcrStatus({
+          state: "INVALID",
+          message: res.reason ?? "لم يُعثر على أرقام القراءة داخل الإطار — أعد التصوير مع وضع الأرقام داخل الإطار",
+        });
+        return;
+      }
+      if (res.ambiguous || res.confidence < 0.75) {
+        setOcrStatus({
+          state: "AMBIGUOUS",
+          value: res.readingValue,
+          message: `القراءة غير محسومة (${res.readingDigits ?? res.readingValue}، ثقة ${Math.round(res.confidence * 100)}%) — أعد التصوير أو أدخلها يدوياً`,
+        });
+        return;
+      }
+
+      // طبقة التحقق مقابل القراءة السابقة — لا تختار الرقم، بل تتحقق منه فقط.
+      const prev = lastReading?.current_reading ?? null;
+      if (prev !== null && res.readingValue < prev) {
+        setOcrStatus({
+          state: "INVALID",
+          value: res.readingValue,
+          message: `القراءة المستخرجة (${res.readingValue}) أقل من القراءة السابقة (${prev}) — تحقق يدوياً`,
+        });
+        return;
+      }
+      if (prev !== null && avgConsumption > 0 && res.readingValue - prev > avgConsumption * 3) {
+        setOcrStatus({
+          state: "AMBIGUOUS",
+          value: res.readingValue,
+          message: `الاستهلاك المستخرج (${res.readingValue - prev} م³) يتجاوز ثلاثة أضعاف المتوسط — راجع الرقم قبل الحفظ`,
+        });
+        return;
+      }
+
+      setCurrent(String(res.readingValue));
+      setOcrStatus({
+        state: "VALID",
+        value: res.readingValue,
+        message: `تمت تعبئة القراءة تلقائياً (${res.readingValue}، ثقة ${Math.round(res.confidence * 100)}%)`,
+      });
+      toast.success(`تمت قراءة العداد تلقائياً: ${res.readingValue}`);
+    } catch (e) {
+      setOcrStatus({
+        state: "SKIPPED",
+        message: `تعذّر التحليل الآلي: ${(e as Error).message} — أدخل القراءة يدوياً`,
+      });
+    } finally {
+      setOcrBusy(false);
+    }
   }
 
   function clearPhoto() {
     setPhotoBlob(null);
     setPhotoPreview(undefined);
+    setOcrStatus(null);
+    setOcrSerial(undefined);
   }
+
 
   async function captureGeo() {
     setGeoBusy(true);
