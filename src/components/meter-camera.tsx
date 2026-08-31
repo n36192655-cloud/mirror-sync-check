@@ -372,10 +372,26 @@ export const MeterCamera: React.FC<MeterCameraProps> = ({
         <div className="relative w-full max-w-md overflow-hidden rounded-lg bg-black aspect-video flex items-center justify-center">
           <video
             ref={videoRef}
-            className="w-full h-full object-cover"
+            className="w-full h-full object-contain"
             playsInline
             muted
           />
+
+          {/* إطار قراءة العداد — نفس نِسَب READING_ROI المستخدمة في الاقتصاص الفعلي */}
+          <div
+            className="pointer-events-none absolute border-2 border-emerald-400 rounded-md shadow-[0_0_0_9999px_rgba(0,0,0,0.35)]"
+            style={{
+              left: `${READING_ROI.x * 100}%`,
+              top: `${READING_ROI.y * 100}%`,
+              width: `${READING_ROI.w * 100}%`,
+              height: `${READING_ROI.h * 100}%`,
+            }}
+          >
+            <span className="absolute -top-6 right-0 text-[11px] text-emerald-300 whitespace-nowrap">
+              ضع أرقام القراءة داخل الإطار
+            </span>
+          </div>
+
 
           <div className="absolute bottom-4 flex gap-4">
             <Button
