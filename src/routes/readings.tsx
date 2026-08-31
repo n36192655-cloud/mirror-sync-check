@@ -1,5 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useState, useEffect, useMemo, useCallback } from "react";
+import { useServerFn } from "@tanstack/react-start";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/lib/auth";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -14,11 +15,13 @@ import {
   Check, X, Image as ImageIcon, Loader2, RefreshCw,
 } from "lucide-react";
 import { fmtYER } from "@/lib/pricing";
-import { MeterCamera } from "@/components/meter-camera";
+import { MeterCamera, type MeterRoi } from "@/components/meter-camera";
+import { readMeterPhoto } from "@/lib/meter-ocr.functions";
 import { getGeoFix, type GeoFix } from "@/lib/geolocation";
 import { addPending, useOfflineQueue, syncPending, isUnsynced, type PendingReading } from "@/lib/sync";
 import { readFieldCache, saveFieldCache, requestPersistentStorage } from "@/lib/offline-db";
 import type { Database } from "@/integrations/supabase/types";
+
 
 type CustomerRow = Database["public"]["Tables"]["customers"]["Row"];
 type ReadingRow = Database["public"]["Tables"]["water_readings"]["Row"];
@@ -71,6 +74,12 @@ function ReadingsPage() {
   const [photoBlob, setPhotoBlob] = useState<Blob | null>(null);
   const [photoPreview, setPhotoPreview] = useState<string | undefined>();
   const [ocrSerial, setOcrSerial] = useState<string | undefined>();
+  const [ocrBusy, setOcrBusy] = useState(false);
+  const [ocrStatus, setOcrStatus] = useState<
+    { state: "VALID" | "AMBIGUOUS" | "INVALID" | "SKIPPED"; message: string; value?: number } | null
+  >(null);
+  const runMeterOcr = useServerFn(readMeterPhoto);
+
   const [geo, setGeo] = useState<GeoFix | null>(null);
   const [geoBusy, setGeoBusy] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -246,17 +255,110 @@ function ReadingsPage() {
     if (!m) toast.error("لا يوجد عداد مرتبط بهذا المشترك — اربط عداداً من صفحة المشتركين");
   }
 
-  function handleCapture(file: File, previewUrl: string) {
+  /** تحويل الصورة الأصلية إلى data URL لإرسالها كسياق للنموذج (الأصل يبقى كما هو للحفظ). */
+  function blobToDataUrl(blob: Blob): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onload = () => resolve(String(fr.result));
+      fr.onerror = () => reject(new Error("تعذّر قراءة الصورة"));
+      fr.readAsDataURL(blob);
+    });
+  }
+
+  /** متوسط الاستهلاك المعتمد لهذا العداد — يُستخدم كطبقة تحقق فقط (نفس قاعدة الخادم: قفزة > 3×). */
+  const avgConsumption = useMemo(() => {
+    if (!meterId) return 0;
+    const vals = readings
+      .filter((r) => r.meter_id === meterId && r.status === "approved" && typeof r.consumption === "number")
+      .map((r) => Number(r.consumption));
+    if (vals.length === 0) return 0;
+    return vals.reduce((a, b) => a + b, 0) / vals.length;
+  }, [readings, meterId]);
+
+  async function handleCapture(file: File, previewUrl: string, roi?: MeterRoi) {
     setPhotoBlob(file);
     setPhotoPreview(previewUrl);
     setOcrSerial(undefined);
+    setOcrStatus(null);
     toast.success("تم إرفاق صورة العداد");
+
+    if (!roi) {
+      setOcrStatus({ state: "SKIPPED", message: "تعذّر اقتصاص منطقة القراءة — أدخل القراءة يدوياً" });
+      return;
+    }
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      setOcrStatus({ state: "SKIPPED", message: "لا يوجد اتصال — القراءة الآلية غير متاحة، أدخل القراءة يدوياً" });
+      return;
+    }
+
+    setOcrBusy(true);
+    try {
+      const fullImage = await blobToDataUrl(file).catch(() => undefined);
+      const res = await runMeterOcr({
+        data: fullImage ? { roiImage: roi.dataUrl, fullImage } : { roiImage: roi.dataUrl },
+      });
+
+      if (res.serial) setOcrSerial(res.serial);
+
+      if (!res.roiFound || res.readingValue === null) {
+        setOcrStatus({
+          state: "INVALID",
+          message: res.reason ?? "لم يُعثر على أرقام القراءة داخل الإطار — أعد التصوير مع وضع الأرقام داخل الإطار",
+        });
+        return;
+      }
+      if (res.ambiguous || res.confidence < 0.75) {
+        setOcrStatus({
+          state: "AMBIGUOUS",
+          value: res.readingValue,
+          message: `القراءة غير محسومة (${res.readingDigits ?? res.readingValue}، ثقة ${Math.round(res.confidence * 100)}%) — أعد التصوير أو أدخلها يدوياً`,
+        });
+        return;
+      }
+
+      // طبقة التحقق مقابل القراءة السابقة — لا تختار الرقم، بل تتحقق منه فقط.
+      const prev = lastReading?.current_reading ?? null;
+      if (prev !== null && res.readingValue < prev) {
+        setOcrStatus({
+          state: "INVALID",
+          value: res.readingValue,
+          message: `القراءة المستخرجة (${res.readingValue}) أقل من القراءة السابقة (${prev}) — تحقق يدوياً`,
+        });
+        return;
+      }
+      if (prev !== null && avgConsumption > 0 && res.readingValue - prev > avgConsumption * 3) {
+        setOcrStatus({
+          state: "AMBIGUOUS",
+          value: res.readingValue,
+          message: `الاستهلاك المستخرج (${res.readingValue - prev} م³) يتجاوز ثلاثة أضعاف المتوسط — راجع الرقم قبل الحفظ`,
+        });
+        return;
+      }
+
+      setCurrent(String(res.readingValue));
+      setOcrStatus({
+        state: "VALID",
+        value: res.readingValue,
+        message: `تمت تعبئة القراءة تلقائياً (${res.readingValue}، ثقة ${Math.round(res.confidence * 100)}%)`,
+      });
+      toast.success(`تمت قراءة العداد تلقائياً: ${res.readingValue}`);
+    } catch (e) {
+      setOcrStatus({
+        state: "SKIPPED",
+        message: `تعذّر التحليل الآلي: ${(e as Error).message} — أدخل القراءة يدوياً`,
+      });
+    } finally {
+      setOcrBusy(false);
+    }
   }
 
   function clearPhoto() {
     setPhotoBlob(null);
     setPhotoPreview(undefined);
+    setOcrStatus(null);
+    setOcrSerial(undefined);
   }
+
 
   async function captureGeo() {
     setGeoBusy(true);
@@ -271,7 +373,7 @@ function ReadingsPage() {
 
   function resetForm() {
     setCurrent(""); setPhotoBlob(null); setPhotoPreview(undefined);
-    setOcrSerial(undefined); setGeo(null);
+    setOcrSerial(undefined); setOcrStatus(null); setGeo(null);
     setReadingDate(new Date().toISOString().slice(0, 10));
   }
 
@@ -281,11 +383,13 @@ function ReadingsPage() {
     if (!selectedMeter) return toast.error("لا يوجد عداد مرتبط بهذا المشترك");
     if (current === "" || Number.isNaN(+current)) return toast.error("أدخل القراءة الحالية");
 
+    // تنبيه فقط: اختلاف الرقم التسلسلي المستخرج لا يمنع حفظ قراءة الاستهلاك.
     if (ocrSerial &&
         ocrSerial.replace(/[-\s]/g, "").toUpperCase() !==
         meterNumber.replace(/[-\s]/g, "").toUpperCase()) {
-      return toast.error(`رفض: رقم العداد الملتقط (${ocrSerial}) لا يطابق (${meterNumber})`);
+      toast.warning(`تنبيه: الرقم التسلسلي الملتقط (${ocrSerial}) لا يطابق (${meterNumber})`);
     }
+
 
     let fix = geo;
     if (!fix && isReader) {
@@ -471,7 +575,35 @@ function ReadingsPage() {
               <div>
                 <Label>القراءة الحالية</Label>
                 <Input type="number" value={current} onChange={(e) => setCurrent(e.target.value)} />
+                {ocrBusy && (
+                  <p className="text-[11px] text-muted-foreground mt-1 flex items-center gap-1">
+                    <Loader2 className="w-3 h-3 animate-spin" /> جارٍ قراءة العداد آلياً من الصورة…
+                  </p>
+                )}
+                {!ocrBusy && ocrStatus && (
+                  <p
+                    className={`text-[11px] mt-1 ${
+                      ocrStatus.state === "VALID"
+                        ? "text-emerald-600"
+                        : ocrStatus.state === "INVALID"
+                          ? "text-destructive"
+                          : "text-amber-600"
+                    }`}
+                  >
+                    {ocrStatus.message}
+                    {ocrStatus.state === "AMBIGUOUS" && ocrStatus.value !== undefined && (
+                      <button
+                        type="button"
+                        className="underline ms-2"
+                        onClick={() => setCurrent(String(ocrStatus.value))}
+                      >
+                        استخدام {ocrStatus.value} يدوياً
+                      </button>
+                    )}
+                  </p>
+                )}
               </div>
+
             </div>
 
             <div className="grid md:grid-cols-2 gap-3">

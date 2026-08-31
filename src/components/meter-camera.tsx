@@ -3,23 +3,79 @@ import { Camera, RefreshCw, Upload, Check, AlertCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 
+/**
+ * إطار قراءة العداد (ROI) — نِسَب من أبعاد الصورة المصدر.
+ * الإطار المعروض في الكاميرا يستخدم نفس النِسَب تماماً، فهو مرتبط فعلياً بالإحداثيات
+ * (عنصر الفيديو يُعرض بـ object-contain حتى يطابق العرضُ مساحةَ الصورة الملتقطة بلا اقتصاص).
+ */
+export const READING_ROI = { x: 0.08, y: 0.36, w: 0.84, h: 0.28 } as const;
+
+export interface MeterRoi {
+  /** قصاصة منطقة القراءة كـ data URL (JPEG) — تُرسل إلى AI OCR. */
+  dataUrl: string;
+  /** إحداثيات القصاصة بالبكسل داخل الصورة الأصلية المحفوظة. */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 interface MeterCameraProps {
-  onCapture: (imageFile: File, previewUrl: string) => void;
+  onCapture: (imageFile: File, previewUrl: string, roi?: MeterRoi) => void;
   onClear?: () => void;
   initialPreview?: string;
 }
+
+/** اقتصاص منطقة القراءة من الصورة المصدر بنفس نِسَب الإطار المعروض. */
+const cropRoi = (
+  source: CanvasImageSource,
+  srcWidth: number,
+  srcHeight: number,
+  outWidth: number,
+  outHeight: number,
+): MeterRoi | undefined => {
+  const sx = Math.round(srcWidth * READING_ROI.x);
+  const sy = Math.round(srcHeight * READING_ROI.y);
+  const sw = Math.round(srcWidth * READING_ROI.w);
+  const sh = Math.round(srcHeight * READING_ROI.h);
+  if (sw < 16 || sh < 16) return undefined;
+
+  // تكبير القصاصة إلى عرض 1024px كحد أقصى لتحسين وضوح الأرقام لدى نموذج الرؤية.
+  const targetW = Math.min(1024, Math.max(sw, 512));
+  const targetH = Math.round((sh * targetW) / sw);
+
+  const canvas = document.createElement("canvas");
+  canvas.width = targetW;
+  canvas.height = targetH;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return undefined;
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(source, sx, sy, sw, sh, 0, 0, targetW, targetH);
+
+  // الإحداثيات بالنسبة للصورة المحفوظة (بعد الضغط) وليست الأصل الخام.
+  const scaleX = outWidth / srcWidth;
+  const scaleY = outHeight / srcHeight;
+  return {
+    dataUrl: canvas.toDataURL("image/jpeg", 0.92),
+    x: Math.round(sx * scaleX),
+    y: Math.round(sy * scaleY),
+    width: Math.round(sw * scaleX),
+    height: Math.round(sh * scaleY),
+  };
+};
 
 /**
  * دالة مساعدة لضغط الصور والحفاظ على وضوح أرقام العداد
  * - الحد الأقصى للأبعاد: 1600x1200
  * - الجودة: JPEG 0.82
- * - الناتج: File حقيقي جاهز للرفع السحابي إلى Supabase Storage Bucket (meter-readings)
+ * - الناتج: الصورة الأصلية (للأرشيف/الرفع) + قصاصة ROI (لتحليل AI) — لا استبدال للأصل.
  */
 const compressImage = (
   source: HTMLVideoElement | HTMLImageElement,
   width: number,
   height: number
-): Promise<{ file: File; previewUrl: string }> => {
+): Promise<{ file: File; previewUrl: string; roi?: MeterRoi }> => {
   return new Promise((resolve, reject) => {
     const canvas = document.createElement("canvas");
     const MAX_WIDTH = 1600;
@@ -52,6 +108,14 @@ const compressImage = (
     ctx.imageSmoothingQuality = "high";
     ctx.drawImage(source, 0, 0, targetWidth, targetHeight);
 
+    // قصاصة منطقة القراءة من المصدر بأعلى دقة متاحة (قبل التصغير)
+    let roi: MeterRoi | undefined;
+    try {
+      roi = cropRoi(source, width, height, targetWidth, targetHeight);
+    } catch {
+      roi = undefined;
+    }
+
     canvas.toBlob(
       (blob) => {
         if (blob) {
@@ -61,7 +125,7 @@ const compressImage = (
             lastModified: Date.now(),
           });
           const previewUrl = URL.createObjectURL(compressedFile);
-          resolve({ file: compressedFile, previewUrl });
+          resolve({ file: compressedFile, previewUrl, roi });
         } else {
           reject(new Error("فشل تحويل الصورة إلى Blob"));
         }
@@ -71,6 +135,7 @@ const compressImage = (
     );
   });
 };
+
 
 export const MeterCamera: React.FC<MeterCameraProps> = ({
   onCapture,
@@ -185,7 +250,7 @@ export const MeterCamera: React.FC<MeterCameraProps> = ({
       const width = video.videoWidth || 1280;
       const height = video.videoHeight || 720;
 
-      const { file, previewUrl: newPreview } = await compressImage(
+      const { file, previewUrl: newPreview, roi } = await compressImage(
         video,
         width,
         height
@@ -194,7 +259,8 @@ export const MeterCamera: React.FC<MeterCameraProps> = ({
       cleanupPreview();
       setPreviewUrl(newPreview);
       stopCamera();
-      onCapture(file, newPreview);
+      onCapture(file, newPreview, roi);
+
     } catch (err: any) {
       console.error("Error capturing meter photo:", err);
       setError("حدث خطأ أثناء التقاط وضغط صورة العداد.");
@@ -222,7 +288,7 @@ export const MeterCamera: React.FC<MeterCameraProps> = ({
 
     img.onload = async () => {
       try {
-        const { file, previewUrl: newPreview } = await compressImage(
+        const { file, previewUrl: newPreview, roi } = await compressImage(
           img,
           img.naturalWidth || 1280,
           img.naturalHeight || 720
@@ -232,7 +298,8 @@ export const MeterCamera: React.FC<MeterCameraProps> = ({
         cleanupPreview();
         setPreviewUrl(newPreview);
         stopCamera();
-        onCapture(file, newPreview);
+        onCapture(file, newPreview, roi);
+
       } catch (err: any) {
         console.error("Error compressing gallery image:", err);
         setError("تعذر معالجة وضغط الصورة المختارة.");
@@ -305,10 +372,26 @@ export const MeterCamera: React.FC<MeterCameraProps> = ({
         <div className="relative w-full max-w-md overflow-hidden rounded-lg bg-black aspect-video flex items-center justify-center">
           <video
             ref={videoRef}
-            className="w-full h-full object-cover"
+            className="w-full h-full object-contain"
             playsInline
             muted
           />
+
+          {/* إطار قراءة العداد — نفس نِسَب READING_ROI المستخدمة في الاقتصاص الفعلي */}
+          <div
+            className="pointer-events-none absolute border-2 border-emerald-400 rounded-md shadow-[0_0_0_9999px_rgba(0,0,0,0.35)]"
+            style={{
+              left: `${READING_ROI.x * 100}%`,
+              top: `${READING_ROI.y * 100}%`,
+              width: `${READING_ROI.w * 100}%`,
+              height: `${READING_ROI.h * 100}%`,
+            }}
+          >
+            <span className="absolute -top-6 right-0 text-[11px] text-emerald-300 whitespace-nowrap">
+              ضع أرقام القراءة داخل الإطار
+            </span>
+          </div>
+
 
           <div className="absolute bottom-4 flex gap-4">
             <Button
