@@ -250,7 +250,7 @@ export const MeterCamera: React.FC<MeterCameraProps> = ({
       const width = video.videoWidth || 1280;
       const height = video.videoHeight || 720;
 
-      const { file, previewUrl: newPreview } = await compressImage(
+      const { file, previewUrl: newPreview, roi } = await compressImage(
         video,
         width,
         height
@@ -259,7 +259,8 @@ export const MeterCamera: React.FC<MeterCameraProps> = ({
       cleanupPreview();
       setPreviewUrl(newPreview);
       stopCamera();
-      onCapture(file, newPreview);
+      onCapture(file, newPreview, roi);
+
     } catch (err: any) {
       console.error("Error capturing meter photo:", err);
       setError("حدث خطأ أثناء التقاط وضغط صورة العداد.");
