@@ -288,7 +288,7 @@ export const MeterCamera: React.FC<MeterCameraProps> = ({
 
     img.onload = async () => {
       try {
-        const { file, previewUrl: newPreview } = await compressImage(
+        const { file, previewUrl: newPreview, roi } = await compressImage(
           img,
           img.naturalWidth || 1280,
           img.naturalHeight || 720
@@ -298,7 +298,8 @@ export const MeterCamera: React.FC<MeterCameraProps> = ({
         cleanupPreview();
         setPreviewUrl(newPreview);
         stopCamera();
-        onCapture(file, newPreview);
+        onCapture(file, newPreview, roi);
+
       } catch (err: any) {
         console.error("Error compressing gallery image:", err);
         setError("تعذر معالجة وضغط الصورة المختارة.");
