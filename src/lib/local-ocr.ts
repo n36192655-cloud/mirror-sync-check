@@ -161,7 +161,8 @@ export async function readMeterLocally(
   let worker: TesseractWorker;
   try {
     worker = await getWorker();
-  } catch {
+  } catch (e) {
+    console.error("[local-ocr] worker init failed", e);
     return { ...base, reason: "محرك القراءة المحلي غير مهيأ على هذا الجهاز — أعد الاتصال مرة لتحميله" };
   }
 
