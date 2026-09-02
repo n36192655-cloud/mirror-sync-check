@@ -2,6 +2,7 @@ import React, { useRef, useState, useCallback, useEffect } from "react";
 import { Camera, RefreshCw, Upload, Check, AlertCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { analyzeRoiCanvas, type QualityVerdict } from "@/lib/meter-vision";
 
 /**
  * إطار قراءة العداد (ROI) — نِسَب من أبعاد الصورة المصدر.
@@ -13,6 +14,8 @@ export const READING_ROI = { x: 0.08, y: 0.36, w: 0.84, h: 0.28 } as const;
 export interface MeterRoi {
   /** قصاصة منطقة القراءة كـ data URL (JPEG) — تُرسل إلى AI OCR. */
   dataUrl: string;
+  /** حكم جودة الصورة داخل الإطار وقت الالتقاط (فحص محلي بلا استهلاك رصيد). */
+  quality?: QualityVerdict | null;
   /** إحداثيات القصاصة بالبكسل داخل الصورة الأصلية المحفوظة. */
   x: number;
   y: number;
@@ -53,11 +56,14 @@ const cropRoi = (
   ctx.imageSmoothingQuality = "high";
   ctx.drawImage(source, sx, sy, sw, sh, 0, 0, targetW, targetH);
 
+  const quality = analyzeRoiCanvas(canvas);
+
   // الإحداثيات بالنسبة للصورة المحفوظة (بعد الضغط) وليست الأصل الخام.
   const scaleX = outWidth / srcWidth;
   const scaleY = outHeight / srcHeight;
   return {
     dataUrl: canvas.toDataURL("image/jpeg", 0.92),
+    quality,
     x: Math.round(sx * scaleX),
     y: Math.round(sy * scaleY),
     width: Math.round(sw * scaleX),
@@ -150,6 +156,33 @@ export const MeterCamera: React.FC<MeterCameraProps> = ({
   const [previewUrl, setPreviewUrl] = useState<string | null>(initialPreview || null);
   const [error, setError] = useState<string | null>(null);
   const [isCompressing, setIsCompressing] = useState<boolean>(false);
+  const [live, setLive] = useState<QualityVerdict | null>(null);
+
+  // فحص جودة حي لمنطقة القراءة — محلي بالكامل، يمنع استهلاك الرصيد على صورة رديئة.
+  useEffect(() => {
+    if (!isCameraActive) { setLive(null); return; }
+    const probe = document.createElement("canvas");
+    const tick = () => {
+      const video = videoRef.current;
+      if (!video || !video.videoWidth) return;
+      const sw = Math.round(video.videoWidth * READING_ROI.w);
+      const sh = Math.round(video.videoHeight * READING_ROI.h);
+      const scale = Math.min(1, 480 / Math.max(1, sw));
+      probe.width = Math.max(8, Math.round(sw * scale));
+      probe.height = Math.max(8, Math.round(sh * scale));
+      const ctx = probe.getContext("2d", { willReadFrequently: true });
+      if (!ctx) return;
+      ctx.drawImage(
+        video,
+        Math.round(video.videoWidth * READING_ROI.x),
+        Math.round(video.videoHeight * READING_ROI.y),
+        sw, sh, 0, 0, probe.width, probe.height,
+      );
+      setLive(analyzeRoiCanvas(probe));
+    };
+    const id = window.setInterval(tick, 600);
+    return () => window.clearInterval(id);
+  }, [isCameraActive]);
 
   // إيقاف بث الكاميرا وتفريغ الموارد
   const stopCamera = useCallback(() => {
@@ -379,7 +412,13 @@ export const MeterCamera: React.FC<MeterCameraProps> = ({
 
           {/* إطار قراءة العداد — نفس نِسَب READING_ROI المستخدمة في الاقتصاص الفعلي */}
           <div
-            className="pointer-events-none absolute border-2 border-emerald-400 rounded-md shadow-[0_0_0_9999px_rgba(0,0,0,0.35)]"
+            className={`pointer-events-none absolute border-2 rounded-md shadow-[0_0_0_9999px_rgba(0,0,0,0.35)] transition-colors ${
+              live?.level === "good"
+                ? "border-emerald-400"
+                : live?.level === "warn"
+                  ? "border-amber-400"
+                  : "border-red-400"
+            }`}
             style={{
               left: `${READING_ROI.x * 100}%`,
               top: `${READING_ROI.y * 100}%`,
@@ -387,8 +426,16 @@ export const MeterCamera: React.FC<MeterCameraProps> = ({
               height: `${READING_ROI.h * 100}%`,
             }}
           >
-            <span className="absolute -top-6 right-0 text-[11px] text-emerald-300 whitespace-nowrap">
-              ضع أرقام القراءة داخل الإطار
+            <span
+              className={`absolute -top-6 right-0 text-[11px] whitespace-nowrap ${
+                live?.level === "good"
+                  ? "text-emerald-300"
+                  : live?.level === "warn"
+                    ? "text-amber-300"
+                    : "text-red-300"
+              }`}
+            >
+              {live?.hint ?? "ضع أرقام القراءة داخل الإطار"}
             </span>
           </div>
 
@@ -397,12 +444,16 @@ export const MeterCamera: React.FC<MeterCameraProps> = ({
             <Button
               type="button"
               onClick={capturePhoto}
-              disabled={isCompressing}
+              disabled={isCompressing || live?.level === "bad"}
               variant="default"
-              className="gap-2 bg-emerald-600 hover:bg-emerald-700 text-white"
+              className="gap-2 bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-60"
             >
               <Check className="w-4 h-4" />
-              {isCompressing ? "جاري الضغط..." : "التقاط القراءة"}
+              {isCompressing
+                ? "جاري الضغط..."
+                : live?.level === "bad"
+                  ? live.hint
+                  : "التقاط القراءة"}
             </Button>
 
             <Button
