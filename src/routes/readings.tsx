@@ -597,38 +597,87 @@ function ReadingsPage() {
                   placeholder="يُحدَّد تلقائياً من العداد المرتبط بالمشترك" />
               </div>
               <div>
-                <Label>القراءة الحالية</Label>
-                <Input type="number" value={current} onChange={(e) => setCurrent(e.target.value)} />
+                <Label>القراءة الحالية (تُملأ آلياً من الصورة)</Label>
+                <Input
+                  type="number"
+                  value={current}
+                  readOnly={!manualUnlock}
+                  className={manualUnlock ? "" : "bg-muted/40 font-mono"}
+                  placeholder="صوّر العداد لاستخراج القراءة"
+                  onChange={(e) => { setCurrent(e.target.value); setConfirmed(false); }}
+                />
                 {ocrBusy && (
                   <p className="text-[11px] text-muted-foreground mt-1 flex items-center gap-1">
-                    <Loader2 className="w-3 h-3 animate-spin" /> جارٍ قراءة العداد آلياً من الصورة…
+                    <Loader2 className="w-3 h-3 animate-spin" /> جارٍ قراءة العداد من الصورة…
                   </p>
                 )}
-                {!ocrBusy && ocrStatus && (
-                  <p
-                    className={`text-[11px] mt-1 ${
-                      ocrStatus.state === "VALID"
-                        ? "text-emerald-600"
-                        : ocrStatus.state === "INVALID"
-                          ? "text-destructive"
-                          : "text-amber-600"
-                    }`}
+                {!isReader && (
+                  <button
+                    type="button"
+                    className="text-[11px] underline text-muted-foreground mt-1"
+                    onClick={() => { setManualUnlock((v) => !v); setConfirmed(false); }}
                   >
-                    {ocrStatus.message}
-                    {ocrStatus.state === "AMBIGUOUS" && ocrStatus.value !== undefined && (
-                      <button
-                        type="button"
-                        className="underline ms-2"
-                        onClick={() => setCurrent(String(ocrStatus.value))}
-                      >
-                        استخدام {ocrStatus.value} يدوياً
-                      </button>
-                    )}
-                  </p>
+                    {manualUnlock ? "إلغاء الإدخال اليدوي" : "إدخال يدوي (استثناء إداري)"}
+                  </button>
                 )}
               </div>
 
             </div>
+
+            {/* نتيجة التحقق واعتماد القارئ — لا حفظ نهائي قبل الاعتماد */}
+            {verdict && !ocrBusy && (
+              <div
+                className={`rounded-lg border p-3 space-y-2 text-sm ${
+                  verdict.state === "VALID"
+                    ? "border-emerald-500/40 bg-emerald-500/5"
+                    : verdict.state === "REJECTED"
+                      ? "border-destructive/50 bg-destructive/5"
+                      : "border-amber-500/40 bg-amber-500/5"
+                }`}
+              >
+                <div className="flex items-center gap-2 font-semibold">
+                  {verdict.state === "VALID"
+                    ? <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                    : <AlertCircle className="w-4 h-4 text-amber-600" />}
+                  {verdict.state === "VALID" ? "نتيجة القراءة" : "تعذّر اعتماد القراءة"}
+                  {vision && (
+                    <Badge variant="outline" className="ms-auto text-[10px]">
+                      {vision.source === "gemini" ? "تحليل سحابي" : "تحليل محلي (أوفلاين)"}
+                      {vision.confidence > 0 ? ` · ثقة ${Math.round(vision.confidence * 100)}%` : ""}
+                    </Badge>
+                  )}
+                </div>
+                <p className={verdict.state === "VALID" ? "text-muted-foreground text-xs" : "text-xs"}>
+                  {verdict.message}
+                </p>
+
+                {verdict.state === "VALID" && (
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs pt-1">
+                    <Info label="المشترك">{selectedCustomer?.name ?? "—"}</Info>
+                    <Info label="رقم العداد"><span className="font-mono" dir="ltr">{meterNumber || "—"}</span></Info>
+                    <Info label="القراءة السابقة"><span className="font-mono">{lastReading?.current_reading ?? 0}</span></Info>
+                    <Info label="القراءة الحالية"><span className="font-mono font-bold">{verdict.value}</span></Info>
+                    <Info label="الاستهلاك"><span className="font-mono">{verdict.consumption ?? verdict.value} م³</span></Info>
+                  </div>
+                )}
+
+                <div className="flex flex-wrap gap-2 pt-1">
+                  {verdict.state === "VALID" && (
+                    <Button
+                      size="sm"
+                      variant={confirmed ? "default" : "outline"}
+                      onClick={() => setConfirmed(true)}
+                      disabled={confirmed}
+                    >
+                      <Check className="w-4 h-4 ms-1" /> {confirmed ? "تم اعتماد القراءة" : "اعتماد القراءة"}
+                    </Button>
+                  )}
+                  <Button size="sm" variant="outline" onClick={() => { clearPhoto(); setCameraOpen(true); }}>
+                    <RefreshCw className="w-4 h-4 ms-1" /> إعادة التصوير
+                  </Button>
+                </div>
+              </div>
+            )}
 
             <div className="grid md:grid-cols-2 gap-3">
               <div>
@@ -644,8 +693,16 @@ function ReadingsPage() {
               </div>
             </div>
 
-            <Button onClick={saveReading} size="lg" disabled={saving || geoBusy} className="w-full md:w-auto">
-              {saving ? <><Loader2 className="w-4 h-4 ms-1 animate-spin" /> جاري الحفظ…</> : "حفظ القراءة"}
+            <Button
+              onClick={saveReading}
+              size="lg"
+              disabled={
+                saving || geoBusy || ocrBusy ||
+                (!manualUnlock && (!verdict || verdict.state !== "VALID" || !confirmed))
+              }
+              className="w-full md:w-auto"
+            >
+              {saving ? <><Loader2 className="w-4 h-4 ms-1 animate-spin" /> جاري الحفظ…</> : "الحفظ النهائي"}
             </Button>
 
             {(photoPreview || ocrSerial || geo) && (
