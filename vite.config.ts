@@ -28,6 +28,9 @@ export default defineConfig({
         devOptions: { enabled: false },
         workbox: {
           globPatterns: ["**/*.{js,css,woff2,png,svg,ico,html}"],
+          // موارد OCR المحلي كبيرة ولا تُسبق-تُخزَّن؛ تُجهَّز عند الطلب أثناء الاتصال
+          // عبر prefetchLocalOcrAssets() في كاش mizan-ocr.
+          globIgnores: ["**/ocr/**"],
           // مهم: لا نستخدم navigateFallback هنا. في generateSW يُسجَّل NavigationRoute
           // الخاص به قبل runtimeCaching، فيبتلع كل تنقّل أوفلاين ويعرض offline.html
           // حتى لو كانت نسخة الصفحة محفوظة. بدلاً من ذلك نتعامل مع التنقّل عبر
@@ -64,8 +67,19 @@ export default defineConfig({
               },
             },
             {
+              // موارد محرك القراءة المحلي (Tesseract) — تبقى محلية للعمل أوفلاين.
+              urlPattern: ({ url, sameOrigin }) => !!sameOrigin && url.pathname.startsWith("/ocr/"),
+              handler: "CacheFirst",
+              options: {
+                cacheName: "mizan-ocr",
+                expiration: { maxEntries: 12, maxAgeSeconds: 60 * 60 * 24 * 180 },
+                cacheableResponse: { statuses: [200] },
+              },
+            },
+            {
               urlPattern: ({ url, sameOrigin }) =>
-                sameOrigin && /\.(?:js|css|woff2|png|svg|ico)$/.test(url.pathname),
+                sameOrigin && !url.pathname.startsWith("/ocr/") &&
+                /\.(?:js|css|woff2|png|svg|ico)$/.test(url.pathname),
               handler: "CacheFirst",
               options: {
                 cacheName: "mizan-assets",
