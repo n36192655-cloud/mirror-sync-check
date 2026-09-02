@@ -17,6 +17,12 @@ import {
 import { fmtYER } from "@/lib/pricing";
 import { MeterCamera, type MeterRoi } from "@/components/meter-camera";
 import { readMeterPhoto } from "@/lib/meter-ocr.functions";
+import {
+  validateMeterReading,
+  type MeterVisionResult,
+  type MeterVerdict,
+} from "@/lib/meter-vision";
+import { readMeterLocally, prefetchLocalOcrAssets } from "@/lib/local-ocr";
 import { getGeoFix, type GeoFix } from "@/lib/geolocation";
 import { addPending, useOfflineQueue, syncPending, isUnsynced, type PendingReading } from "@/lib/sync";
 import { readFieldCache, saveFieldCache, requestPersistentStorage } from "@/lib/offline-db";
@@ -75,9 +81,10 @@ function ReadingsPage() {
   const [photoPreview, setPhotoPreview] = useState<string | undefined>();
   const [ocrSerial, setOcrSerial] = useState<string | undefined>();
   const [ocrBusy, setOcrBusy] = useState(false);
-  const [ocrStatus, setOcrStatus] = useState<
-    { state: "VALID" | "AMBIGUOUS" | "INVALID" | "SKIPPED"; message: string; value?: number } | null
-  >(null);
+  const [vision, setVision] = useState<MeterVisionResult | null>(null);
+  const [verdict, setVerdict] = useState<MeterVerdict | null>(null);
+  const [confirmed, setConfirmed] = useState(false);
+  const [manualUnlock, setManualUnlock] = useState(false);
   const runMeterOcr = useServerFn(readMeterPhoto);
 
   const [geo, setGeo] = useState<GeoFix | null>(null);
@@ -174,6 +181,9 @@ function ReadingsPage() {
   }, [tenantId]);
 
   useEffect(() => { void refresh(); }, [refresh]);
+
+  // تجهيز موارد محرك القراءة المحلي أثناء الاتصال ليعمل القارئ لاحقاً دون إنترنت.
+  useEffect(() => { void prefetchLocalOcrAssets(); }, []);
 
 
 
@@ -275,77 +285,85 @@ function ReadingsPage() {
     return vals.reduce((a, b) => a + b, 0) / vals.length;
   }, [readings, meterId]);
 
+  /** توحيد نتيجة Gemini إلى عقد الرؤية المشترك. */
+  function fromGemini(res: Awaited<ReturnType<typeof readMeterPhoto>>): MeterVisionResult {
+    return {
+      meterNumber: res.meterNumber ?? res.serial ?? null,
+      currentReading: res.roiFound ? res.readingValue : null,
+      readingDigits: res.readingDigits,
+      confidence: res.confidence,
+      ambiguous: res.ambiguous || !res.roiFound,
+      source: "gemini",
+      capturedAt: res.capturedAt ?? new Date().toISOString(),
+      reason: res.reason,
+    };
+  }
+
+  /**
+   * مسار موحّد: جودة محلية → (Gemini أونلاين | OCR محلي أوفلاين) → تحقق MIZAN.
+   * لا يُستدعى Gemini إلا بعد اجتياز فحص الجودة المحلي (توفير الرصيد).
+   */
   async function handleCapture(file: File, previewUrl: string, roi?: MeterRoi) {
     setPhotoBlob(file);
     setPhotoPreview(previewUrl);
     setOcrSerial(undefined);
-    setOcrStatus(null);
-    toast.success("تم إرفاق صورة العداد");
+    setVision(null);
+    setVerdict(null);
+    setConfirmed(false);
+    setCurrent("");
 
-    if (!roi) {
-      setOcrStatus({ state: "SKIPPED", message: "تعذّر اقتصاص منطقة القراءة — أدخل القراءة يدوياً" });
-      return;
-    }
-    if (typeof navigator !== "undefined" && !navigator.onLine) {
-      setOcrStatus({ state: "SKIPPED", message: "لا يوجد اتصال — القراءة الآلية غير متاحة، أدخل القراءة يدوياً" });
-      return;
+    const reject = (message: string) =>
+      setVerdict({ state: "INVALID", message, value: null, consumption: null, meterMatch: "unknown" });
+
+    if (!selectedMeter) return reject("اختر المشترك وتأكد من وجود عداد مرتبط قبل التصوير");
+    if (!roi) return reject("تعذّر اقتصاص منطقة القراءة — أعد التصوير");
+    if (roi.quality && !roi.quality.ok && roi.quality.level === "bad") {
+      return reject(`جودة الصورة غير كافية: ${roi.quality.hint} — أعد التصوير`);
     }
 
     setOcrBusy(true);
     try {
-      const fullImage = await blobToDataUrl(file).catch(() => undefined);
-      const res = await runMeterOcr({
-        data: fullImage ? { roiImage: roi.dataUrl, fullImage } : { roiImage: roi.dataUrl },
+      const online = typeof navigator === "undefined" || navigator.onLine;
+      let result: MeterVisionResult;
+
+      if (online) {
+        const fullImage = await blobToDataUrl(file).catch(() => undefined);
+        const res = await runMeterOcr({
+          data: {
+            roiImage: roi.dataUrl,
+            ...(fullImage ? { fullImage } : {}),
+            ...(meterNumber ? { expectedMeterNumber: meterNumber } : {}),
+          },
+        });
+        result = fromGemini(res);
+      } else {
+        result = await readMeterLocally(roi.dataUrl);
+      }
+
+      setVision(result);
+      if (result.meterNumber) setOcrSerial(result.meterNumber);
+
+      const v = validateMeterReading({
+        result,
+        expectedMeterNumber: meterNumber,
+        previousReading: lastReading?.current_reading ?? null,
+        avgConsumption,
       });
+      setVerdict(v);
 
-      if (res.serial) setOcrSerial(res.serial);
-
-      if (!res.roiFound || res.readingValue === null) {
-        setOcrStatus({
-          state: "INVALID",
-          message: res.reason ?? "لم يُعثر على أرقام القراءة داخل الإطار — أعد التصوير مع وضع الأرقام داخل الإطار",
-        });
-        return;
+      if (v.state === "VALID" && v.value !== null) {
+        setCurrent(String(v.value));
+        toast.success(`تمت قراءة العداد ${result.source === "gemini" ? "سحابياً" : "محلياً"}: ${v.value}`);
+      } else {
+        toast.error(v.message);
       }
-      if (res.ambiguous || res.confidence < 0.75) {
-        setOcrStatus({
-          state: "AMBIGUOUS",
-          value: res.readingValue,
-          message: `القراءة غير محسومة (${res.readingDigits ?? res.readingValue}، ثقة ${Math.round(res.confidence * 100)}%) — أعد التصوير أو أدخلها يدوياً`,
-        });
-        return;
-      }
-
-      // طبقة التحقق مقابل القراءة السابقة — لا تختار الرقم، بل تتحقق منه فقط.
-      const prev = lastReading?.current_reading ?? null;
-      if (prev !== null && res.readingValue < prev) {
-        setOcrStatus({
-          state: "INVALID",
-          value: res.readingValue,
-          message: `القراءة المستخرجة (${res.readingValue}) أقل من القراءة السابقة (${prev}) — تحقق يدوياً`,
-        });
-        return;
-      }
-      if (prev !== null && avgConsumption > 0 && res.readingValue - prev > avgConsumption * 3) {
-        setOcrStatus({
-          state: "AMBIGUOUS",
-          value: res.readingValue,
-          message: `الاستهلاك المستخرج (${res.readingValue - prev} م³) يتجاوز ثلاثة أضعاف المتوسط — راجع الرقم قبل الحفظ`,
-        });
-        return;
-      }
-
-      setCurrent(String(res.readingValue));
-      setOcrStatus({
-        state: "VALID",
-        value: res.readingValue,
-        message: `تمت تعبئة القراءة تلقائياً (${res.readingValue}، ثقة ${Math.round(res.confidence * 100)}%)`,
-      });
-      toast.success(`تمت قراءة العداد تلقائياً: ${res.readingValue}`);
     } catch (e) {
-      setOcrStatus({
-        state: "SKIPPED",
-        message: `تعذّر التحليل الآلي: ${(e as Error).message} — أدخل القراءة يدوياً`,
+      setVerdict({
+        state: "INVALID",
+        message: `تعذّر تحليل الصورة: ${(e as Error).message} — أعد التصوير`,
+        value: null,
+        consumption: null,
+        meterMatch: "unknown",
       });
     } finally {
       setOcrBusy(false);
@@ -355,8 +373,11 @@ function ReadingsPage() {
   function clearPhoto() {
     setPhotoBlob(null);
     setPhotoPreview(undefined);
-    setOcrStatus(null);
     setOcrSerial(undefined);
+    setVision(null);
+    setVerdict(null);
+    setConfirmed(false);
+    setCurrent("");
   }
 
 
@@ -373,7 +394,8 @@ function ReadingsPage() {
 
   function resetForm() {
     setCurrent(""); setPhotoBlob(null); setPhotoPreview(undefined);
-    setOcrSerial(undefined); setOcrStatus(null); setGeo(null);
+    setOcrSerial(undefined); setVision(null); setVerdict(null);
+    setConfirmed(false); setManualUnlock(false); setGeo(null);
     setReadingDate(new Date().toISOString().slice(0, 10));
   }
 
@@ -381,13 +403,15 @@ function ReadingsPage() {
     if (!tenantId || !user) return toast.error("لا توجد جلسة نشطة");
     if (!selectedCustomer) return toast.error("اختر مشتركاً");
     if (!selectedMeter) return toast.error("لا يوجد عداد مرتبط بهذا المشترك");
-    if (current === "" || Number.isNaN(+current)) return toast.error("أدخل القراءة الحالية");
-
-    // تنبيه فقط: اختلاف الرقم التسلسلي المستخرج لا يمنع حفظ قراءة الاستهلاك.
-    if (ocrSerial &&
-        ocrSerial.replace(/[-\s]/g, "").toUpperCase() !==
-        meterNumber.replace(/[-\s]/g, "").toUpperCase()) {
-      toast.warning(`تنبيه: الرقم التسلسلي الملتقط (${ocrSerial}) لا يطابق (${meterNumber})`);
+    if (current === "" || Number.isNaN(+current)) return toast.error("لم تُستخرج قراءة صالحة — أعد التصوير");
+    if (!manualUnlock) {
+      if (!verdict || verdict.state !== "VALID") {
+        return toast.error("القراءة لم تجتز التحقق — أعد التصوير");
+      }
+      if (!confirmed) return toast.error("اعتمد القراءة المعروضة أولاً");
+    }
+    if (verdict?.meterMatch === "mismatch") {
+      return toast.error("رقم العداد الملتقط لا يطابق عداد المشترك — لا يمكن اعتماد القراءة");
     }
 
 
