@@ -1,15 +1,13 @@
 import { createServerFn } from "@tanstack/react-start";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
+import type { MeterVisionResult } from "@/lib/meter-vision";
 
 /** عقد نتيجة قراءة العداد بالذكاء الاصطناعي (structured JSON، بلا parsing لنص حر). */
-export interface MeterOcrResult {
+export interface MeterOcrResult extends Omit<MeterVisionResult, "currentReading"> {
   roiFound: boolean;
+  source: "gemini";
   readingValue: number | null;
-  readingDigits: string | null;
-  confidence: number; // 0..1
-  ambiguous: boolean;
   serial: string | null;
-  reason: string | null;
 }
 
 interface OcrInput {
@@ -17,6 +15,8 @@ interface OcrInput {
   roiImage: string;
   /** الصورة الكاملة كمرجع سياقي (اختياري). */
   fullImage?: string;
+  /** رقم عداد المشترك المتوقّع — للتحقق من الهوية، لا للتخمين. */
+  expectedMeterNumber?: string;
 }
 
 const MAX_IMAGE_CHARS = 8_000_000; // ~6MB base64
@@ -29,7 +29,13 @@ function validateOcr(input: unknown): OcrInput {
   const fullRaw = typeof obj["fullImage"] === "string" ? obj["fullImage"] : "";
   const fullImage =
     fullRaw.startsWith("data:image/") && fullRaw.length <= MAX_IMAGE_CHARS ? fullRaw : undefined;
-  return fullImage ? { roiImage, fullImage } : { roiImage };
+  const expectedRaw = typeof obj["expectedMeterNumber"] === "string" ? obj["expectedMeterNumber"] : "";
+  const expectedMeterNumber = expectedRaw.trim().slice(0, 40) || undefined;
+  return {
+    roiImage,
+    ...(fullImage ? { fullImage } : {}),
+    ...(expectedMeterNumber ? { expectedMeterNumber } : {}),
+  };
 }
 
 const SYSTEM = `أنت خبير قراءة عدادات المياه الميكانيكية والرقمية من الصور.
@@ -47,8 +53,12 @@ const SYSTEM = `أنت خبير قراءة عدادات المياه الميك�
 - لا تخمّن أرقاماً غير مرئية. لا تكمل خانات ناقصة.
 - serial: أعده فقط إذا قرأته بوضوح تام من جسم العداد، وإلا null.
 
+- meterNumber: الرقم التسلسلي/رقم العداد المطبوع على جسم العداد — أعده فقط إذا قرأته بوضوح تام من الصورة، وإلا null. لا تخترعه ولا تنسخه من أي رقم آخر.
+- meterNumberVisible: هل رقم العداد ظاهر ومقروء فعلاً.
+- readingVisible: هل نافذة قراءة الاستهلاك ظاهرة ومقروءة فعلاً.
+
 أعد JSON فقط بالمخطط التالي وبلا أي نص آخر:
-{"roiFound":boolean,"readingValue":number|null,"readingDigits":string|null,"confidence":number,"ambiguous":boolean,"serial":string|null,"reason":string|null}
+{"roiFound":boolean,"readingValue":number|null,"readingDigits":string|null,"readingUnit":"m3","readingVisible":boolean,"meterNumber":string|null,"meterNumberVisible":boolean,"confidence":number,"ambiguous":boolean,"serial":string|null,"reason":string|null}
 - readingDigits: الأرقام كما قرأتها نصاً (مثل "00123").
 - confidence: بين 0 و1.
 - reason: سبب مختصر بالعربية عند الفشل أو الغموض، وإلا null.`;
@@ -61,7 +71,12 @@ export const readMeterPhoto = createServerFn({ method: "POST" })
     if (!apiKey) throw new Error("خدمة تحليل الصور غير مهيأة.");
 
     const content: Array<Record<string, unknown>> = [
-      { type: "text", text: "اقرأ قراءة الاستهلاك من قصاصة منطقة القراءة التالية." },
+      {
+        type: "text",
+        text: data.expectedMeterNumber
+          ? `اقرأ قراءة الاستهلاك من قصاصة منطقة القراءة التالية. رقم العداد المتوقّع لدى النظام هو «${data.expectedMeterNumber}» — تحقّق فقط مما إذا كان الرقم المطبوع على العداد يطابقه، ولا تنسخه إن لم تره.`
+          : "اقرأ قراءة الاستهلاك من قصاصة منطقة القراءة التالية.",
+      },
       { type: "image_url", image_url: { url: data.roiImage } },
     ];
     if (data.fullImage) {
@@ -107,6 +122,9 @@ export const readMeterPhoto = createServerFn({ method: "POST" })
         confidence: 0,
         ambiguous: true,
         serial: null,
+        meterNumber: null,
+        source: "gemini",
+        capturedAt: new Date().toISOString(),
         reason: "استجابة غير مفهومة من محرك التحليل",
       };
     }
@@ -130,10 +148,19 @@ export const readMeterPhoto = createServerFn({ method: "POST" })
     const serial =
       typeof serialRaw === "string" && serialRaw.trim().length >= 3 ? serialRaw.trim().slice(0, 40) : null;
 
+    const meterRaw = parsed["meterNumber"];
+    const meterNumber =
+      parsed["meterNumberVisible"] !== false && typeof meterRaw === "string" && meterRaw.trim().length >= 3
+        ? meterRaw.trim().slice(0, 40)
+        : serial;
+
     const reasonRaw = parsed["reason"];
 
     return {
-      roiFound: parsed["roiFound"] === true,
+      roiFound: parsed["roiFound"] === true && parsed["readingVisible"] !== false,
+      meterNumber,
+      source: "gemini",
+      capturedAt: new Date().toISOString(),
       readingValue: value,
       readingDigits: digits && digits !== "" ? digits : null,
       confidence,
